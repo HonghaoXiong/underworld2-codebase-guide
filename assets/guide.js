@@ -86,7 +86,7 @@
         anchor.href = "#";
         anchor.classList.add("local-link");
         anchor.title =
-          "This link points to a local file path. Set repositoryBaseUrl in docs/assets/guide.config.js after uploading to GitHub.";
+          "This link points to a local file path. Set repositoryBaseUrl after uploading to GitHub.";
         anchor.addEventListener("click", (event) => event.preventDefault());
         localOnly += 1;
       }
@@ -100,13 +100,13 @@
 
     if (mapped > 0) {
       linkStatusText.textContent =
-        `${mapped} code-reference links were mapped to your repository URL. ` +
+        `${mapped} code-reference links were mapped to the official repository. ` +
         `${localOnly} remain local-only.`;
       return;
     }
 
     linkStatusText.textContent =
-      "Code-reference links still point to local file paths. After uploading to GitHub, set repositoryBaseUrl in docs/assets/guide.config.js so they become clickable online source links.";
+      "Code-reference links still point to local file paths. Set repositoryBaseUrl in guide.config.js after uploading.";
   }
 
   function buildToc() {
@@ -199,7 +199,7 @@
         </div>
       `;
       linkStatusText.textContent =
-        "The Markdown source could not be loaded. Check markdownPath in docs/assets/guide.config.js.";
+        "The Markdown source could not be loaded. Check markdownPath in guide.config.js.";
     }
   }
 
