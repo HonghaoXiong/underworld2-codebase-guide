@@ -15,7 +15,7 @@
   --hero-shadow: 0 24px 80px rgba(78, 52, 33, 0.12);
   --deep-shadow: 0 28px 120px rgba(54, 34, 18, 0.16);
   --max-width: 1660px;
-  --content-width: 980px;
+  --content-width: 1040px;
 }
 
 html[data-theme="dark"] {
@@ -453,7 +453,7 @@ body {
 
 .article-frame {
   position: relative;
-  padding: 52px clamp(18px, 2.6vw, 42px) 56px clamp(20px, 2.8vw, 36px);
+  padding: 52px clamp(18px, 2.4vw, 34px) 56px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 8%),
     var(--bg-elevated);
@@ -470,8 +470,8 @@ body {
 }
 
 .markdown-body {
-  max-width: min(var(--content-width), calc(100% - 8px));
-  margin: 0 0 0 auto;
+  max-width: min(var(--content-width), 100%);
+  margin: 0 auto;
   font-size: 1.08rem;
 }
 
