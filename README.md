@@ -21,3 +21,4 @@ For GitHub Pages:
 1. Use branch `main`.
 2. Use folder `/ (root)`.
 3. Ensure `.nojekyll` stays in the repository root.
+
