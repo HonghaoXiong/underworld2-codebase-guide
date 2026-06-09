@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Underworld2 Guide</title>
+    <meta
+      name="description"
+      content="Elegant HTML reading edition for the Underworld2 codebase guide."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./assets/guide.css" />
+  </head>
+  <body>
+    <div class="progress-bar" id="progress-bar"></div>
+
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Underworld2 Reading Edition</p>
+          <h1 id="site-title">Underworld2 Codebase Guide</h1>
+          <p class="hero-summary" id="site-summary">
+            A calm, readable HTML edition designed for long-form study, code
+            archaeology, and GitHub Pages publishing.
+          </p>
+          <div class="hero-meta">
+            <span class="meta-pill">Markdown preserved</span>
+            <span class="meta-pill">GitHub Pages ready</span>
+            <span class="meta-pill">Mermaid supported</span>
+          </div>
+        </div>
+
+        <div class="hero-actions">
+          <button class="theme-toggle" id="theme-toggle" type="button">
+            Toggle theme
+          </button>
+          <a class="hero-link" href="./underworld2_codebase_guide.md">
+            Open source Markdown
+          </a>
+        </div>
+      </header>
+
+      <div class="content-grid">
+        <aside class="sidebar">
+          <div class="sidebar-card">
+            <h2>Reading Guide</h2>
+            <p>
+              New readers usually start with the learning-path and teaching
+              sections, then return to the native-core chapters.
+            </p>
+          </div>
+
+          <div class="sidebar-card" id="link-status-card">
+            <h2>Source Links</h2>
+            <p id="link-status-text">
+              Checking whether local code references can be mapped to an online
+              repository...
+            </p>
+          </div>
+
+          <nav class="sidebar-card toc-card">
+            <h2>Contents</h2>
+            <div id="toc" class="toc"></div>
+          </nav>
+        </aside>
+
+        <main class="article-shell">
+          <div class="article-frame">
+            <article id="article" class="markdown-body" aria-live="polite">
+              <div class="loading-state">
+                <p>Loading the guide...</p>
+              </div>
+            </article>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script src="./assets/guide.config.js"></script>
+    <script src="./assets/guide.js"></script>
+  </body>
+</html>
