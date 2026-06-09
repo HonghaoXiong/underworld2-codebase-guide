@@ -7,6 +7,7 @@
   const siteTitle = document.getElementById("site-title");
   const siteSummary = document.getElementById("site-summary");
   const linkStatusText = document.getElementById("link-status-text");
+  const cursorGlow = document.getElementById("cursor-glow");
 
   if (siteTitle && config.siteTitle) {
     siteTitle.textContent = config.siteTitle;
@@ -147,6 +148,46 @@
     headings.forEach((heading) => observer.observe(heading));
   }
 
+  function setupCursorGlow() {
+    if (!cursorGlow || window.matchMedia("(pointer: coarse)").matches) {
+      return;
+    }
+
+    const moveGlow = (event) => {
+      cursorGlow.style.opacity = "1";
+      cursorGlow.style.transform = `translate(${event.clientX - cursorGlow.offsetWidth / 2}px, ${event.clientY - cursorGlow.offsetHeight / 2}px)`;
+    };
+
+    window.addEventListener("pointermove", moveGlow, { passive: true });
+    window.addEventListener("pointerleave", () => {
+      cursorGlow.style.opacity = "0";
+    });
+  }
+
+  function setupRevealAnimations() {
+    const revealNodes = article.querySelectorAll(
+      ".sidebar-card, .article-frame, .markdown-body h2, .markdown-body h3, .markdown-body table, .markdown-body pre, .markdown-body blockquote, .markdown-body .mermaid"
+    );
+
+    const revealObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) {
+            return;
+          }
+          entry.target.classList.add("is-revealed");
+          revealObserver.unobserve(entry.target);
+        });
+      },
+      {
+        rootMargin: "0px 0px -8% 0px",
+        threshold: 0.06,
+      }
+    );
+
+    revealNodes.forEach((node) => revealObserver.observe(node));
+  }
+
   function enhanceMermaidBlocks() {
     const mermaidBlocks = article.querySelectorAll("pre code.language-mermaid");
 
@@ -188,6 +229,7 @@
       rewriteLocalCodeLinks();
       buildToc();
       enhanceMermaidBlocks();
+      setupRevealAnimations();
       updateProgress();
     } catch (error) {
       article.innerHTML = `
@@ -206,5 +248,6 @@
   window.addEventListener("scroll", updateProgress, { passive: true });
   window.addEventListener("resize", updateProgress);
 
+  setupCursorGlow();
   loadGuide();
 })();
