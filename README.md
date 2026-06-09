@@ -1,5 +1,6 @@
 # Underworld2 Codebase Guide
 [![Read Online](https://img.shields.io/badge/Read-Online-brown?style=for-the-badge)](https://honghaoxiong.github.io/underworld2-codebase-guide/)
+
 This repository contains an elegant HTML reading edition of the Underworld2 codebase guide.
 
 ## Web Edition
