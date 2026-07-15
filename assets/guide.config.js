@@ -1,10 +1,9 @@
 window.UWGuideConfig = {
   markdownPath: "./underworld2_codebase_guide.md",
   backupMarkdownPath: "./underworld2_codebase_guide.backup.md",
-  localRepoRoot: "/Users/haibinyang/underworld2-2.17.x",
-  repositoryBaseUrl: "https://github.com/underworldcode/underworld2/blob/main",
+  repositoryBaseUrl: "https://github.com/underworldcode/underworld2/tree/v2.17.x",
   repositoryHomeUrl: "https://github.com/HonghaoXiong/underworld2-codebase-guide",
-  siteTitle: "Underworld2 Codebase Guide",
+  siteTitle: "From Mantle Flow to Surface Change",
   siteSummary:
-    "An elegant HTML reading edition for long-form study, code archaeology, and GitHub Pages publishing.",
+    "A source-guided field guide to the architecture that turns planetary interiors, deforming crust, and evolving landscapes into parallel numerical models.",
 };

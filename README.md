@@ -1,25 +1,23 @@
-# Underworld2 Codebase Guide
-[![Read Online](https://img.shields.io/badge/Read-Online-brown?style=for-the-badge)](https://honghaoxiong.github.io/underworld2-codebase-guide/)
+# Underworld2 Codebase Field Guide
 
-This repository contains an elegant HTML reading edition of the Underworld2 codebase guide.
+[![Read online](https://img.shields.io/badge/read-online-2b7a68?style=for-the-badge)](https://honghaoxiong.github.io/underworld2-codebase-guide/)
+[![Underworld2](https://img.shields.io/badge/source-v2.17.x-c5663c?style=for-the-badge)](https://github.com/underworldcode/underworld2/tree/v2.17.x)
 
-## Web Edition
+A source-verified guide to Underworld2 for geoscientists, model users, and new developers. It connects the physical workflow—from mantle convection and lithospheric deformation to free surfaces, erosion, and sedimentation—to the Python API, compiled native framework, and PETSc solver stack.
 
-- Open `index.html` locally, or publish the repository with GitHub Pages.
-- The source Markdown is kept in `underworld2_codebase_guide.md`.
-- A backup copy is kept in `underworld2_codebase_guide.backup.md`.
+## What is included
 
-## Code References
+- A 24-section long-form guide checked against an Underworld2 2.17.1 source snapshot.
+- Direct, public source references to the official `v2.17.x` maintenance branch.
+- Architecture, runtime bootstrap, StGermain/StgDomain/StgFEM, PICellerator, and PETSc/BSSCR walkthroughs.
+- Beginner reading paths, a minimal executable heat model, a terminology glossary, and reproducibility guidance.
+- A responsive GitHub Pages reading edition with source search, diagrams, light/dark themes, and reduced-motion support.
 
-The guide maps source links to the official Underworld2 repository:
+## Files
 
-- <https://github.com/underworldcode/underworld2>
+- `underworld2_codebase_guide.md` — canonical tutorial source.
+- `index.html` — GitHub Pages reading shell.
+- `assets/guide.css` — responsive planetary-science visual system.
+- `assets/guide.js` — Markdown rendering, navigation, search, diagrams, and geodynamics background motion.
 
-## Publishing
-
-For GitHub Pages:
-
-1. Use branch `main`.
-2. Use folder `/ (root)`.
-3. Ensure `.nojekyll` stays in the repository root.
-
+The site is published from the `main` branch root through GitHub Pages.

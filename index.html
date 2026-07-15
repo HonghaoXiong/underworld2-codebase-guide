@@ -1,112 +1,180 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-theme="dark">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Underworld2 Guide</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090d13" />
+    <title>Underworld2 Codebase Field Guide</title>
     <meta
       name="description"
-      content="Elegant HTML reading edition for the Underworld2 codebase guide."
+      content="A source-guided journey through Underworld2, from mantle flow and lithosphere deformation to erosion and sedimentation."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./assets/guide.css" />
   </head>
   <body>
+    <canvas id="geodynamics-canvas" class="geodynamics-canvas" aria-hidden="true"></canvas>
     <div class="ambient-stage" aria-hidden="true">
-      <div class="ambient-orb ambient-orb-a"></div>
-      <div class="ambient-orb ambient-orb-b"></div>
-      <div class="ambient-grid"></div>
-      <div class="ambient-noise"></div>
+      <div class="star-field"></div>
+      <div class="mantle-glow mantle-glow-a"></div>
+      <div class="mantle-glow mantle-glow-b"></div>
+      <div class="topographic-lines"></div>
     </div>
-    <div class="progress-bar" id="progress-bar"></div>
-    <div class="cursor-glow" id="cursor-glow" aria-hidden="true"></div>
+
+    <div class="progress-track" aria-hidden="true">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
 
     <div class="page-shell">
-      <header class="hero">
+      <header class="hero" id="top">
         <div class="hero-copy">
-          <p class="eyebrow">Underworld2 Reading Edition</p>
-          <h1 id="site-title">Underworld2 Codebase Guide</h1>
+          <div class="hero-kicker">
+            <span class="signal-dot"></span>
+            Source-verified · Underworld2 2.17.x
+          </div>
+          <p class="eyebrow">Geodynamics · Code archaeology · Numerical methods</p>
+          <h1 id="site-title">From Mantle Flow<br />to Surface Change</h1>
           <p class="hero-summary" id="site-summary">
-            A calm, readable HTML edition designed for long-form study, code
-            archaeology, and GitHub Pages publishing.
+            A field guide to the architecture that turns planetary interiors,
+            deforming crust, and evolving landscapes into parallel numerical models.
           </p>
-          <div class="hero-meta">
-            <span class="meta-pill">Markdown preserved</span>
-            <span class="meta-pill">GitHub Pages ready</span>
-            <span class="meta-pill">Mermaid supported</span>
+
+          <div class="hero-paths" aria-label="Recommended reading paths">
+            <a href="#10-suggested-learning-path-beginner-confident-developer">Start modelling</a>
+            <a href="#3-architecture-overview-layers-and-responsibilities">Trace the architecture</a>
+            <a href="#21-from-governing-equations-to-code-implementation">Follow the equations</a>
           </div>
-          <div class="hero-stats">
-            <div class="hero-stat">
-              <span class="hero-stat-label">Focus</span>
-              <strong>Architecture + Equations</strong>
+
+          <dl class="hero-stats">
+            <div>
+              <dt>Source snapshot</dt>
+              <dd>2.17.1</dd>
             </div>
-            <div class="hero-stat">
-              <span class="hero-stat-label">Reading Mode</span>
-              <strong>Long-form technical essay</strong>
+            <div>
+              <dt>Guide depth</dt>
+              <dd id="chapter-count">24 sections</dd>
             </div>
-          </div>
+            <div>
+              <dt>Physical span</dt>
+              <dd>Core → surface</dd>
+            </div>
+          </dl>
         </div>
 
-        <div class="hero-visual" aria-hidden="true">
-          <div class="hero-ring hero-ring-a"></div>
-          <div class="hero-ring hero-ring-b"></div>
-          <div class="hero-core">
-            <span class="hero-core-label">UW2</span>
+        <div class="planet-stage">
+          <div class="orbit orbit-a"><span></span></div>
+          <div class="orbit orbit-b"><span></span></div>
+          <div class="planet-aura" aria-hidden="true"></div>
+          <div class="earth-cutaway-wrap">
+            <img
+              class="earth-cutaway"
+              src="./assets/earth-cutaway-v2.png"
+              alt="Realistic cutaway of Earth showing the crust, mantle, outer core, and inner core"
+              width="1254"
+              height="1254"
+              fetchpriority="high"
+            />
+            <div class="thermal-shimmer thermal-shimmer-a" aria-hidden="true"></div>
+            <div class="thermal-shimmer thermal-shimmer-b" aria-hidden="true"></div>
           </div>
-          <div class="hero-axis hero-axis-x"></div>
-          <div class="hero-axis hero-axis-y"></div>
+          <div class="depth-label label-crust"><span></span>Crust</div>
+          <div class="depth-label label-mantle"><span></span>Mantle</div>
+          <div class="depth-label label-outer-core"><span></span>Outer core</div>
+          <div class="depth-label label-inner-core"><span></span>Inner core</div>
         </div>
 
         <div class="hero-actions">
-          <button class="theme-toggle" id="theme-toggle" type="button">
-            Toggle theme
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch colour theme">
+            <span class="theme-icon" aria-hidden="true">◐</span>
+            <span>Theme</span>
           </button>
-          <a class="hero-link" href="./underworld2_codebase_guide.md">
-            Open source Markdown
+          <a class="icon-button" id="repository-link" href="https://github.com/HonghaoXiong/underworld2-codebase-guide">
+            <span aria-hidden="true">↗</span>
+            <span>GitHub</span>
           </a>
         </div>
       </header>
 
+      <div class="section-ribbon" aria-hidden="true">
+        <span>Planetary interior</span>
+        <i></i>
+        <span>Mantle convection</span>
+        <i></i>
+        <span>Lithosphere</span>
+        <i></i>
+        <span>Erosion &amp; sedimentation</span>
+      </div>
+
       <div class="content-grid">
-        <aside class="sidebar">
-          <div class="sidebar-card">
-            <h2>Reading Guide</h2>
-            <p>
-              New readers usually start with the learning-path and teaching
-              sections, then return to the native-core chapters.
-            </p>
+        <aside class="sidebar" aria-label="Guide navigation">
+          <div class="sidebar-card guide-intro">
+            <p class="card-label">Field notes</p>
+            <h2>Choose a depth</h2>
+            <p>Begin with modelling concepts, then descend into the native runtime and solver stack.</p>
+            <div class="depth-scale" aria-hidden="true">
+              <span>Python</span><i></i><span>PETSc</span>
+            </div>
           </div>
 
-          <div class="sidebar-card" id="link-status-card">
-            <h2>Source Links</h2>
-            <p id="link-status-text">
-              Checking whether local code references can be mapped to an online
-              repository...
-            </p>
+          <div class="sidebar-card search-card">
+            <label for="guide-search">Search this guide</label>
+            <div class="search-control">
+              <span aria-hidden="true">⌕</span>
+              <input id="guide-search" type="search" placeholder="mesh, swarm, BSSCR…" autocomplete="off" />
+              <kbd>/</kbd>
+            </div>
+            <p id="search-status" class="search-status" aria-live="polite"></p>
           </div>
 
-          <nav class="sidebar-card toc-card">
-            <h2>Contents</h2>
+          <nav class="sidebar-card toc-card" aria-label="Table of contents">
+            <div class="toc-heading">
+              <div>
+                <p class="card-label">Stratigraphic column</p>
+                <h2>Contents</h2>
+              </div>
+              <button id="toc-toggle" type="button" aria-label="Collapse table of contents">−</button>
+            </div>
             <div id="toc" class="toc"></div>
           </nav>
+
+          <div class="sidebar-card source-card">
+            <p class="card-label">Source integrity</p>
+            <h2>Code references</h2>
+            <p id="link-status-text">Checking source references…</p>
+          </div>
         </aside>
 
         <main class="article-shell">
+          <div class="article-toolbar">
+            <div class="toolbar-location">
+              <span class="toolbar-pulse"></span>
+              <span id="current-section">Loading field guide…</span>
+            </div>
+            <div class="reading-progress"><span id="progress-text">0%</span> traversed</div>
+          </div>
           <div class="article-frame">
             <article id="article" class="markdown-body" aria-live="polite">
               <div class="loading-state">
-                <p>Loading the guide...</p>
+                <div class="loading-planet"><span></span></div>
+                <p>Resolving the model layers…</p>
               </div>
             </article>
           </div>
         </main>
       </div>
+
+      <footer class="site-footer">
+        <p>Underworld2 Codebase Field Guide</p>
+        <p>From governing equations to evolving planetary surfaces.</p>
+      </footer>
     </div>
+
+    <button class="back-to-top" id="back-to-top" type="button" aria-label="Back to top">↑</button>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>

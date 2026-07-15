@@ -1,22 +1,36 @@
-# Underworld2 Codebase Guide (for non-specialists)
+# Underworld2 Codebase Guide
 
-This document explains how the Underworld2 codebase is organised and how its main capabilities are implemented, from a “conceptual model” down to the native (compiled) layer. It is written for readers who can read Python but are new to numerical geodynamics and HPC software architecture.
+**A source-guided introduction for geoscientists, model users, and new developers**
+
+This guide explains how Underworld2 turns geodynamic ideas—mantle convection, lithospheric deformation, free-surface motion, erosion, and sedimentation—into executable Python objects, finite-element systems, particle-in-cell data, and parallel native code. It starts with the modelling concepts and progressively traces them into the Python API, the compiled StGermain/StgDomain/StgFEM stack, and PETSc.
+
+> **Version scope.** The guide was checked against the local Underworld2 **2.17.1** source snapshot (`src/underworld/_version.py`) and the repository documentation shipped with that snapshot. Online source links use the official **`v2.17.x` maintenance branch**, so they remain useful while also including later patch-level fixes. Behaviour can differ on `main`, `development`, or Underworld3.
+
+| Guide fact | Value |
+|---|---|
+| Source layout | `src/underworld/` (PEP 621-style package layout introduced in 2.16) |
+| Primary numerical method | Particle-in-cell finite elements for 2-D/3-D geodynamics |
+| Main parallel stack | MPI + PETSc + compiled C/C++ components |
+| Two user surfaces | Core `underworld.*` API and high-level `underworld.UWGeodynamics` |
+| Verification basis | Source files, root/docs/UWGeodynamics READMEs, installation notes, change log, CMake graph, and solver README |
 
 ## 0. How to use this guide
 
-This guide is intentionally layered, so you do **not** need to read it strictly from top to bottom on your first pass.
+Do not read all 24 numbered sections (0–23) linearly on the first pass. Choose a route and return to the deeper chapters when a concrete question sends you there.
 
-> Reading note:
-> - If you are completely new to Underworld2, start with **Section 10**, then jump to **Section 22** and **Section 23** before diving into the native-core chapters.
-> - If you mainly want architecture and source-code understanding, read from **Section 3** onward.
-> - If you are reading this in a Markdown preview, a zoom level around **110%–125%** and a comfortable page width usually makes long technical sections much easier to read.
+| Your goal | Recommended route | What you should be able to explain afterwards |
+|---|---|---|
+| **Run or modify a model** | 1 → 6 → 8 → 10 → 22 → 23 | mesh vs swarm, Function graphs, systems, BCs, and the model time loop |
+| **Understand the architecture** | 1 → 2 → 3 → 4 → 5 → 13 → 19 → 21 | how Python objects become native components, assembled equations, and PETSc solves |
+| **Work on solvers/native code** | 3 → 4 → 5 → 7 → 15–20 → 21 | StGermain lifecycle, StgDomain/StgFEM responsibilities, SLE assembly, and BSSCR |
+| **Study surface-to-interior coupling** | 8 → 9 → 10.4 → 21 | how deformation, free surface, Badlands, erosion, and sedimentation exchange state |
 
-This document cannot enforce font family or font size across all Markdown renderers, so readability is improved here through:
+Throughout the guide:
 
-- shorter sections,
-- clearer transitions,
-- beginner-first signposts,
-- and repeated “memory aid” summaries only where they add value.
+- **Concept** paragraphs explain the geodynamic or numerical idea.
+- **Code path** links show where that idea is implemented.
+- **Memory aid** summaries compress a long section into one reliable sentence.
+- Schematic equations explain architecture; they are not a substitute for the discretisation, units, sign conventions, and stabilisation described in the implementation and notebooks.
 
 ## 1. What Underworld2 is (in one page)
 
@@ -34,7 +48,27 @@ The key design choice is:
 - Python is used to *describe* models and workflows.
 - Heavy computation is executed in a statically typed compiled layer (C/C++) and parallelised with MPI (and PETSc).
 
-This “two-layer” structure is already stated in the package docstring in [__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py#L9-L44).
+This “two-layer” structure is already stated in the package docstring in [__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py#L9-L44).
+
+### 1.1 The geodynamic feedback loop
+
+For a thermo-mechanical model, the most useful mental model is a loop rather than a list of independent modules:
+
+```mermaid
+flowchart LR
+  A["Temperature + composition"] --> B["Density + rheology Functions"]
+  B --> C["Assemble and solve Stokes system"]
+  C --> D["Velocity + pressure"]
+  D --> E["Advect swarm materials and history"]
+  D --> F["Advect/diffuse temperature"]
+  D --> G["Deform mesh / update free surface"]
+  G --> H["Erosion, transport, sedimentation"]
+  H --> A
+  E --> A
+  F --> A
+```
+
+Underworld2 does not hide this chronology. Core API users explicitly decide when to solve, advect, update fields, checkpoint, and render. `UWGeodynamics.Model.run_for(...)` provides a higher-level orchestration loop, but it still composes the same core objects.
 
 ## 2. Repository map (what lives where)
 
@@ -62,6 +96,21 @@ Inside `/docs`, Underworld2 gives you two “paths”:
 - **UWGeodynamics tutorials/examples/benchmarks**: `/docs/UWGeodynamics/**/*`
 
 If you want a structured learning path, see Section 10. If you want the gentlest beginner entry, also see Sections 22 and 23.
+
+### 2.1 Which repository documents are authoritative for what?
+
+The repository READMEs are short, but each answers a different question. Reading them together prevents a common mistake: treating a tutorial, a build note, and an implementation comment as if they had the same scope.
+
+| Document | What it establishes | How to use it |
+|---|---|---|
+| [Root README](https://github.com/underworldcode/underworld2/blob/v2.17.x/README.md) | project purpose, PIC-FEM design, supported modelling styles, installation preference, citation, privacy, and licensing | Start here for the official user-facing description |
+| [docs/README.md](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/README.md) | roles of `examples`, `user_guide`, `pytests`, `development`, `cheatsheet`, and install guides | Use it as the documentation map |
+| [docs/UWGeodynamics/README.md](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/README.md) | roles of UWGeodynamics tutorials, examples, benchmarks, and hosted docs | Use it when choosing high-level learning material |
+| [Installation.rst](https://github.com/underworldcode/underworld2/blob/v2.17.x/Installation.rst) and [container README](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/development/container/README.md) | container-first installation, native/HPC requirements, and Podman preference in 2.17 | Treat these as operational guidance for this release line |
+| `CHANGES.md` (local source snapshot) | release-specific changes such as the 2.16 `src/` move and 2.17 Badlands coupling improvements | Check this before applying advice from an older tutorial; this snapshot file is not tracked on the public `v2.17.x` branch |
+| [KSPSolvers README](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/README) | intended roles of the Stokes KSP and SNES interfaces and how custom KSP types are registered | Use it as the solver-directory design note, then verify details in C source |
+
+The top-level `badlands-*` directories in this local workspace are Badlands source/working copies used for coupling work. They are **not** imported as part of the `underworld` package under `src/underworld/`; the supported coupling surface in Underworld2 is `underworld.UWGeodynamics.surfaceProcesses.Badlands`.
 
 ## 3. Architecture overview (layers and responsibilities)
 
@@ -109,7 +158,7 @@ Reading tip:
 
 ## 4. Runtime bootstrap: what happens when you `import underworld as uw`
 
-The bootstrap logic is the “spine” of the whole system, implemented in [underworld/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py#L49-L168).
+The bootstrap logic is the “spine” of the whole system, implemented in [underworld/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py#L49-L168).
 
 The steps (simplified) are:
 
@@ -139,7 +188,7 @@ sequenceDiagram
   UW->>UW: import underworld.mesh/swarm/function/systems...
 ```
 
-The dynamic module loading itself is implemented in [_stgermain.LoadModules](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L330-L346) and on the C side in [ModulesManager.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c#L161-L217).
+The dynamic module loading itself is implemented in [_stgermain.LoadModules](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L330-L346) and on the C side in [ModulesManager.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c#L161-L217).
 
 ## 5. The “component system” idea (StGermain + `_stgermain.py`)
 
@@ -160,8 +209,8 @@ On the Python side, `_stgermain.py` provides wrappers which:
 
 Key Python classes:
 
-- [StgClass](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L50-L98): wraps a C pointer and manages deletion safely.
-- [StgCompoundComponent](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L132-L220): creates multiple underlying StGermain components and presents them as one Python object.
+- [StgClass](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L50-L98): wraps a C pointer and manages deletion safely.
+- [StgCompoundComponent](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L132-L220): creates multiple underlying StGermain components and presents them as one Python object.
 
 Conceptually:
 
@@ -183,7 +232,7 @@ The Python API is organised around a few foundational “building blocks”. You
 
 ### 6.1 `underworld.function`: the central abstraction
 
-The Function system is described in [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py#L69-L82) as the central design point:
+The Function system is described in [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py#L69-L82) as the central design point:
 
 - You express coefficient fields (e.g., viscosity, density, body force, source terms) as *composable functions* in Python.
 - Evaluation and heavy operations occur in C for performance.
@@ -204,7 +253,7 @@ Mesh objects define:
 - mesh variables (fields defined at nodes/elements),
 - special sets (boundaries, regions).
 
-The user guide chapter [02_TheMesh.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/02_TheMesh.ipynb) is the best starting point.
+The user guide chapter [02_TheMesh.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/02_TheMesh.ipynb) is the best starting point.
 
 ### 6.3 `underworld.swarm`: material points (PIC) + swarm variables
 
@@ -214,11 +263,11 @@ Swarms are sets of particles (material points) that carry:
 - history-dependent variables (plastic strain, melt fraction, etc.),
 - integration points for PIC/FEM coupling.
 
-This is central to Underworld’s “hybrid” approach described in [__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py#L19-L27): accurate Stokes solutions on the mesh, and accurate material advection on particles.
+This is central to Underworld’s “hybrid” approach described in [__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py#L19-L27): accurate Stokes solutions on the mesh, and accurate material advection on particles.
 
 Start here:
 
-- [03_Swarms.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/03_Swarms.ipynb)
+- [03_Swarms.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/03_Swarms.ipynb)
 
 ### 6.4 `underworld.systems`: PDE systems + solvers
 
@@ -231,16 +280,16 @@ The `systems` module packages the “things you solve”, such as:
 - Time integration / swarm advection: `TimeIntegration`, `SwarmAdvector`
 - Solver front-ends: `StokesSolver`, `HeatSolver`, and a generic `Solver(...)` factory
 
-All of these are exported from [systems/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/__init__.py#L12-L22).
+All of these are exported from [systems/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/__init__.py#L12-L22).
 
 Recommended reading order:
 
-- [05_Systems.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/05_Systems.ipynb)
-- [08_StokesSolver.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/08_StokesSolver.ipynb)
+- [05_Systems.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/05_Systems.ipynb)
+- [08_StokesSolver.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/08_StokesSolver.ipynb)
 
 ### 6.5 `underworld.conditions`: boundary conditions and system conditions
 
-Boundary conditions are expressed via condition objects, exported from [conditions/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/conditions/__init__.py#L10-L15):
+Boundary conditions are expressed via condition objects, exported from [conditions/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/conditions/__init__.py#L10-L15):
 
 - `DirichletCondition`
 - `NeumannCondition`
@@ -256,11 +305,11 @@ Underworld’s visualisation module is explicitly designed for MPI:
 - rendering is performed in serial using LavaVu (typically on rank 0),
 - outputs can be raster images or database files for later rendering.
 
-This is stated in [visualisation/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/visualisation/__init__.py#L10-L20).
+This is stated in [visualisation/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/visualisation/__init__.py#L10-L20).
 
 Start here:
 
-- [07_Visualisation.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/07_Visualisation.ipynb)
+- [07_Visualisation.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/07_Visualisation.ipynb)
 
 ### 6.7 `underworld.utils`, `underworld.scaling`, `underworld.mpi`: the “glue”
 
@@ -272,11 +321,11 @@ These modules support practical modelling:
 
 User guide entry point:
 
-- [06_Utilities.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/06_Utilities.ipynb)
+- [06_Utilities.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/06_Utilities.ipynb)
 
 ## 7. Native core libraries (what actually runs fast)
 
-The compiled core lives in `src/underworld/libUnderworld/` and is built with CMake. The build graph is visible in [libUnderworld/CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L78-L207).
+The compiled core lives in `src/underworld/libUnderworld/` and is built with CMake. The build graph is visible in [libUnderworld/CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L78-L207).
 
 The important native libraries are:
 
@@ -294,7 +343,7 @@ In addition to the main libraries, you will see targets like:
 
 - `StgDomain_Toolboxmodule`, `StgFEM_Toolboxmodule`, `PICellerator_Toolboxmodule`, ...
 
-In CMake, these are created as shared libraries with no `lib` prefix (see the `PREFIX ""` pattern in [libUnderworld/CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L102-L108)).
+In CMake, these are created as shared libraries with no `lib` prefix (see the `PREFIX ""` pattern in [libUnderworld/CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L102-L108)).
 
 Purpose:
 
@@ -307,7 +356,7 @@ The SWIG wrapper package is `underworld.libUnderworld.libUnderworldPy`. Its `__i
 
 - `StGermain`, `StgDomain`, `StgFEM`, `Solvers`, `PICellerator`, `Underworld`, `gLucifer`, ...
 
-See [libUnderworldPy/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/__init__.py#L1-L15).
+See [libUnderworldPy/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/__init__.py#L1-L15).
 
 Practical implication:
 
@@ -332,12 +381,12 @@ This style is maximally flexible and exposes numerical choices directly.
 
 Recommended entry points:
 
-- [docs/user_guide](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide)
-- [docs/examples](file:///Users/haibinyang/underworld2-2.17.x/docs/examples)
+- [docs/user_guide](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/user_guide)
+- [docs/examples](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/examples)
 
 ### 8.2 UWGeodynamics (“high-level DSL for geodynamics workflows”)
 
-`underworld.UWGeodynamics` is a higher-level modelling layer inside the same source tree. Its public entry point is [UWGeodynamics/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/__init__.py).
+`underworld.UWGeodynamics` is a higher-level modelling layer inside the same source tree. Its public entry point is [UWGeodynamics/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/__init__.py).
 
 It re-exports:
 
@@ -352,9 +401,9 @@ UWGeodynamics is a good choice when you want to:
 
 Recommended entry points:
 
-- [docs/UWGeodynamics/tutorials](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/tutorials)
-- [docs/UWGeodynamics/examples](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/examples)
-- [docs/UWGeodynamics/benchmarks](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/benchmarks)
+- [docs/UWGeodynamics/tutorials](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/UWGeodynamics/tutorials)
+- [docs/UWGeodynamics/examples](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/UWGeodynamics/examples)
+- [docs/UWGeodynamics/benchmarks](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/UWGeodynamics/benchmarks)
 
 ## 9. UWGeodynamics module structure (deep dive)
 
@@ -362,22 +411,22 @@ This section explains how `underworld.UWGeodynamics` is structured internally an
 
 ### 9.1 Directory map
 
-The module lives at [UWGeodynamics](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics) and contains:
+The module lives at [UWGeodynamics](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/UWGeodynamics) and contains:
 
-- Public API entrypoint: [UWGeodynamics/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/__init__.py)
-- Core orchestration: [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py)
-- Materials: [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py)
-- Rheology and plasticity: [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py)
-- Density models: [UWGeodynamics/_density.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_density.py)
-- Melt phase relations: [UWGeodynamics/_melt.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_melt.py)
-- Boundary condition wrappers: [UWGeodynamics/_boundary_conditions.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py)
-- Free surface and stabilisation: [UWGeodynamics/_freesurface.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_freesurface.py)
-- Remeshing utilities: [UWGeodynamics/_remeshing.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_remeshing.py)
-- Mesh advection utilities: [UWGeodynamics/_mesh_advector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py)
-- Shapes and geometry helpers: [UWGeodynamics/shapes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/shapes.py)
-- Surface processes integration: [UWGeodynamics/surfaceProcesses.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py)
-- Postprocessing helpers: [UWGeodynamics/postprocessing](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/postprocessing)
-- Reference registries (JSON): [UWGeodynamics/resources](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/resources)
+- Public API entrypoint: [UWGeodynamics/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/__init__.py)
+- Core orchestration: [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py)
+- Materials: [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py)
+- Rheology and plasticity: [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py)
+- Density models: [UWGeodynamics/_density.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_density.py)
+- Melt phase relations: [UWGeodynamics/_melt.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_melt.py)
+- Boundary condition wrappers: [UWGeodynamics/_boundary_conditions.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py)
+- Free surface and stabilisation: [UWGeodynamics/_freesurface.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_freesurface.py)
+- Remeshing utilities: [UWGeodynamics/_remeshing.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_remeshing.py)
+- Mesh advection utilities: [UWGeodynamics/_mesh_advector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py)
+- Shapes and geometry helpers: [UWGeodynamics/shapes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/shapes.py)
+- Surface processes integration: [UWGeodynamics/surfaceProcesses.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py)
+- Postprocessing helpers: [UWGeodynamics/postprocessing](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/UWGeodynamics/postprocessing)
+- Reference registries (JSON): [UWGeodynamics/resources](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/UWGeodynamics/resources)
 
 ### 9.2 Public API surface (what gets exported)
 
@@ -387,7 +436,7 @@ The top-level import pattern is:
 from underworld import UWGeodynamics as GEO
 ```
 
-The module exports (and re-exports) most “user-facing” classes/functions directly from [UWGeodynamics/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/__init__.py#L6-L44), including:
+The module exports (and re-exports) most “user-facing” classes/functions directly from [UWGeodynamics/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/__init__.py#L6-L44), including:
 
 - Dimensional workflow: `nd`, `dim`, `u` (Pint unit registry)
 - Model entrypoint: `Model`
@@ -401,7 +450,7 @@ This “flat export” design is intentional: it allows tutorials to use `GEO.X`
 
 ### 9.3 The `Model` class is the orchestration hub
 
-The UWGeodynamics `Model` is implemented in [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py#L43-L204). It acts as a high-level container that:
+The UWGeodynamics `Model` is implemented in [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py#L43-L204). It acts as a high-level container that:
 
 - creates the mesh (`underworld.mesh.FeMesh_Cartesian`) and core fields (`MeshVariable`),
 - creates and populates the material swarm (`underworld.swarm.Swarm`),
@@ -464,8 +513,8 @@ Practical reading tip:
 
 UWGeodynamics provides registries so users can refer to standardised rheology/material definitions by name rather than retyping parameter sets.
 
-- Materials and defaults are implemented in [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py#L24-L170).
-- Registries are backed by JSON files in [UWGeodynamics/resources](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/resources), such as:
+- Materials and defaults are implemented in [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py#L24-L170).
+- Registries are backed by JSON files in [UWGeodynamics/resources](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/UWGeodynamics/resources), such as:
   - `Materials.json`
   - `ViscousRheologies.json`
   - `PlasticRheologies.json`
@@ -481,7 +530,7 @@ This pattern supports:
 
 The rheology module builds `underworld.function` expressions for viscosity/yielding/etc.
 
-Example: `Limiter` in [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py#L86-L110) is a `fn.Function` wrapper that clamps a value between bounds using `fn.misc.min/max`.
+Example: `Limiter` in [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py#L86-L110) is a `fn.Function` wrapper that clamps a value between bounds using `fn.misc.min/max`.
 
 This is a recurring theme in UWGeodynamics:
 
@@ -496,18 +545,47 @@ Core Underworld boundary conditions are lower-level and generally take index set
 - accept materials or shapes as selectors,
 - accept scalars, Pint quantities, or `fn.Function` values.
 
-The implementation is in [UWGeodynamics/_boundary_conditions.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py#L13-L219), where `_convert_nodes_to_indexSets(...)` shows how shapes/functions are converted into `FeMesh_IndexSet` selections.
+The implementation is in [UWGeodynamics/_boundary_conditions.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py#L13-L219), where `_convert_nodes_to_indexSets(...)` shows how shapes/functions are converted into `FeMesh_IndexSet` selections.
 
 ### 9.8 Free surface, remeshing, surface processes (workflow extensions)
 
 UWGeodynamics bundles common “research workflow” extensions:
 
-- Free surface stabilisation: [UWGeodynamics/_freesurface.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_freesurface.py)
-- Remeshing: [UWGeodynamics/_remeshing.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_remeshing.py)
-- Mesh advection helpers: [UWGeodynamics/_mesh_advector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py)
-- Surface processes integration: [UWGeodynamics/surfaceProcesses.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py)
+- Free surface stabilisation: [UWGeodynamics/_freesurface.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_freesurface.py)
+- Remeshing: [UWGeodynamics/_remeshing.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_remeshing.py)
+- Mesh advection helpers: [UWGeodynamics/_mesh_advector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py)
+- Surface processes integration: [UWGeodynamics/surfaceProcesses.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py)
 
-These are best understood by following the UWGeodynamics tutorials in `/docs/UWGeodynamics/tutorials/`, where the end-to-end workflow is shown in executable form.
+These mechanisms solve different problems and should not be conflated:
+
+| Mechanism | What changes | Typical physical purpose |
+|---|---|---|
+| Free-surface stabilisation | the Stokes formulation/traction treatment near the upper boundary | reduce numerical instability caused by a rapidly moving surface |
+| Mesh advection and remeshing | mesh-node coordinates and interior node distribution | follow topography while retaining acceptable element quality |
+| Threshold or diffusive surface processes | material identity near a prescribed/evolving surface | represent simplified erosion and sedimentation |
+| Badlands coupling | a surface-evolution model on rank 0 plus state exchanged with Underworld | resolve fluvial/hillslope transport, erosion, deposition, and tectonic forcing |
+
+The coupled Badlands step in 2.17 is roughly:
+
+1. build or recover the Badlands digital elevation model (DEM);
+2. sample Underworld velocity at the **evolving** surface elevation;
+3. convert velocity × timestep into displacement and pass it to Badlands;
+4. advance Badlands to the same physical time;
+5. broadcast the updated surface state from MPI rank 0;
+6. reclassify Underworld particles as air or sediment relative to the new surface.
+
+This sequence is implemented by `Badlands.solve(...)` and its helpers in [surfaceProcesses.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py#L240-L535). The 2.17 change log matters here: velocity sampling was corrected to use dynamic surface elevation rather than the static Badlands basement grid.
+
+Two important modelling cautions follow from the implementation:
+
+- Badlands runs only on rank 0; surface data and sampled velocities are collective/broadcast operations, so the coupling step can scale differently from the Stokes solve.
+- Reassigning particle material across an evolving surface is a coupling rule, not automatic global conservation of sediment mass. Conservation and resolution should be checked for the chosen timestep, DEM spacing, swarm density, and interpolation method.
+
+Executable reading sequence:
+
+1. [Tutorial 6: simple surface processes](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/tutorials/Tutorial_6_Simple_Surface_Processes.ipynb)
+2. [Tutorial 6.2: diffusive surface](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/tutorials/Tutorial_6_2_diffusive_surface.ipynb)
+3. [Tutorial 11: Badlands coupling](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/tutorials/Tutorial_11_Coupling_with_Badlands.ipynb)
 
 ## 10. Suggested learning path (beginner → confident → developer)
 
@@ -517,35 +595,106 @@ If you feel overwhelmed by the implementation chapters later on, pause and read 
 
 ### 10.1 If you want to run models (no codebase diving yet)
 
-1. Core concepts and environment: [01_GettingStarted.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/01_GettingStarted.ipynb)
-2. Mesh: [02_TheMesh.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/02_TheMesh.ipynb)
-3. Swarms: [03_Swarms.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/03_Swarms.ipynb)
-4. Functions: [04_Functions.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/04_Functions.ipynb)
-5. Systems: [05_Systems.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/05_Systems.ipynb)
-6. Utilities + I/O: [06_Utilities.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/06_Utilities.ipynb)
-7. Visualisation: [07_Visualisation.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/07_Visualisation.ipynb)
-8. Stokes solver details: [08_StokesSolver.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/user_guide/08_StokesSolver.ipynb)
+1. Core concepts and environment: [01_GettingStarted.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/01_GettingStarted.ipynb)
+2. Mesh: [02_TheMesh.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/02_TheMesh.ipynb)
+3. Swarms: [03_Swarms.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/03_Swarms.ipynb)
+4. Functions: [04_Functions.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/04_Functions.ipynb)
+5. Systems: [05_Systems.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/05_Systems.ipynb)
+6. Utilities + I/O: [06_Utilities.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/06_Utilities.ipynb)
+7. Visualisation: [07_Visualisation.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/07_Visualisation.ipynb)
+8. Stokes solver details: [08_StokesSolver.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/user_guide/08_StokesSolver.ipynb)
 
 Then choose 2–3 end-to-end examples from:
 
-- [docs/examples](file:///Users/haibinyang/underworld2-2.17.x/docs/examples)
+- [docs/examples](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/examples)
 
 ### 10.2 If you want to build models faster (UWGeodynamics)
 
 After finishing the core user guide once, do:
 
-- [Tutorial_1_ThermoMechanical_Model.ipynb](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/tutorials/Tutorial_1_ThermoMechanical_Model.ipynb)
-- then a tutorial related to your topic (subduction, free surface, coupling, etc.) from [tutorials](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/tutorials).
+- [Tutorial_1_ThermoMechanical_Model.ipynb](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/tutorials/Tutorial_1_ThermoMechanical_Model.ipynb)
+- then a tutorial related to your topic (subduction, free surface, coupling, etc.) from [tutorials](https://github.com/underworldcode/underworld2/tree/v2.17.x/docs/UWGeodynamics/tutorials).
 
 ### 10.3 If you want to understand how the system is implemented (developer path)
 
 Suggested order:
 
-1. Import/bootstrap: [underworld/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py#L49-L108)
-2. Component lifecycle glue: [StgClass](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L50-L98) and [StgCompoundComponent](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L132-L240)
-3. Function system: [Function](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py#L69-L82)
-4. Native build graph: [libUnderworld/CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L78-L207)
-5. Dynamic module loading (native): [ModulesManager.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c#L161-L217)
+1. Import/bootstrap: [underworld/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py#L49-L108)
+2. Component lifecycle glue: [StgClass](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L50-L98) and [StgCompoundComponent](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L132-L240)
+3. Function system: [Function](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py#L69-L82)
+4. Native build graph: [libUnderworld/CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L78-L207)
+5. Dynamic module loading (native): [ModulesManager.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c#L161-L217)
+
+### 10.4 A first executable model: steady heat
+
+This deliberately small example contains the same skeleton as larger models: mesh → variable → boundary condition → system → solver → verification. It is adapted directly from the repository's [steady-state heat example](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/examples/01_Steady_State_Heat.ipynb).
+
+```python
+import numpy as np
+import underworld as uw
+
+mesh = uw.mesh.FeMesh_Cartesian(
+    elementType="Q1/dQ0",
+    elementRes=(16, 8),
+    minCoord=(0.0, 0.0),
+    maxCoord=(2.0, 1.0),
+)
+temperature = mesh.add_variable(nodeDofCount=1)
+temperature.data[:] = 0.0
+
+bottom = mesh.specialSets["Bottom_VertexSet"]
+top = mesh.specialSets["Top_VertexSet"]
+temperature.data[bottom] = 1.0
+temperature.data[top] = 0.0
+
+temperature_bc = uw.conditions.DirichletCondition(
+    variable=temperature,
+    indexSetsPerDof=(bottom + top,),
+)
+heat = uw.systems.SteadyStateHeat(
+    temperatureField=temperature,
+    fn_diffusivity=1.0,
+    conditions=temperature_bc,
+)
+uw.systems.Solver(heat).solve()
+
+mean_temperature = (
+    uw.utils.Integral(temperature, mesh).evaluate()[0] / 2.0
+)
+assert np.isclose(mean_temperature, 0.5)
+```
+
+Read this example in two directions:
+
+- **As a modeller:** change the geometry, diffusivity, or boundary values and predict the result before solving.
+- **As a code reader:** follow `FeMesh_Cartesian`, `MeshVariable`, `DirichletCondition`, `SteadyStateHeat`, `Solver.factory`, and `Integral` into Sections 13 and 18.
+
+Then progress by one new coupling at a time:
+
+1. steady heat → transient advection–diffusion;
+2. Stokes sinker → viscosity and body-force Functions;
+3. Rayleigh–Taylor or convection → temperature–density–flow feedback;
+4. slab subduction → multiple materials and plasticity;
+5. free surface → mesh deformation and stabilisation;
+6. surface processes → erosion/sedimentation or Badlands coupling.
+
+Avoid starting with a fully coupled production model. A model that runs is not necessarily resolved, conservative, or physically well-posed; add verification tests and resolution/timestep studies as each process is introduced.
+
+### 10.5 Environment, parallel runs, and reproducibility
+
+For the 2.17 release line, the repository recommends a container on personal computers and documents native compilation mainly for advanced/HPC environments. The development snapshot also includes a locked Pixi environment (`pixi.toml` / `pixi.lock`). Follow the installation material that matches the exact branch or image tag you use; dependency advice from older Underworld2 releases can be incompatible with the 2.17 PETSc/Python stack.
+
+Minimum reproducibility record for a tutorial or paper model:
+
+- Underworld version and source commit/image tag;
+- Python, MPI, PETSc, HDF5, and solver backend versions;
+- MPI rank count and relevant PETSc options;
+- dimensional scaling coefficients and units;
+- mesh resolution/element type, swarm population, and timestep rule;
+- initial/boundary conditions, random seeds, checkpoint cadence, and restart procedure;
+- verification quantities (norms, benchmark values, conserved inventories) rather than images alone.
+
+Run repository checks from the same environment as the model. `docs/pytests` covers focused Python behaviour, while executable notebooks and benchmark directories provide higher-level regression and physics checks. Parallel I/O, collective evaluation, and rank-0-only visualisation/coupling behaviour should be tested with more than one MPI rank when they matter to the workflow.
 
 ## 11. A “mental model” for reading Underworld2 code
 
@@ -588,27 +737,27 @@ Design principle to keep in mind:
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py) | Runtime bootstrap, module loading, timing/sig fixes | Ensures correct HDF5 linkage, sets `RTLD_GLOBAL` for MPI plugin symbol resolution, initializes StGermain (`StgInit`) and loads toolboxes, then instruments submodules. This centralizes “import-time invariants” so user code is simpler. |
-| [_stgermain.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py) | Python↔C lifecycle glue (component graph creation) | Provides `StgClass` and `StgCompoundComponent` to build/own native components safely (lock/unlock/delete) and run Construct/Build/Initialise automatically. This keeps native object lifecycle consistent across the API. |
-| [timing.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/timing.py) | Optional walltime instrumentation | Activated via `UW_ENABLE_TIMING` before import; wraps modules/classes to report timing without changing user code. |
-| [mpi.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mpi.py) | Minimal MPI facade | Provides `comm/rank/size` and ordered `call_pattern` utilities used by IO and debugging. |
-| [_version.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_version.py) | Version string | Kept separate to avoid importing heavy modules when only version is needed. |
-| [_uwid.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_uwid.py) | Installation/run identifier | Provides a unique id used in import telemetry and diagnostics. |
-| [_net/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_net/__init__.py) | Optional telemetry (opt-out) | Called from `underworld.__init__` on rank 0; isolated so telemetry can be disabled without affecting the numerical core. |
+| [__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py) | Runtime bootstrap, module loading, timing/sig fixes | Ensures correct HDF5 linkage, sets `RTLD_GLOBAL` for MPI plugin symbol resolution, initializes StGermain (`StgInit`) and loads toolboxes, then instruments submodules. This centralizes “import-time invariants” so user code is simpler. |
+| [_stgermain.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py) | Python↔C lifecycle glue (component graph creation) | Provides `StgClass` and `StgCompoundComponent` to build/own native components safely (lock/unlock/delete) and run Construct/Build/Initialise automatically. This keeps native object lifecycle consistent across the API. |
+| [timing.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/timing.py) | Optional walltime instrumentation | Activated via `UW_ENABLE_TIMING` before import; wraps modules/classes to report timing without changing user code. |
+| [mpi.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mpi.py) | Minimal MPI facade | Provides `comm/rank/size` and ordered `call_pattern` utilities used by IO and debugging. |
+| [_version.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_version.py) | Version string | Kept separate to avoid importing heavy modules when only version is needed. |
+| `_uwid.py` (generated locally by `setup.py`) | Installation/run identifier | Provides a unique id used in import telemetry and diagnostics. It is generated during setup and is therefore absent from the public source tree. |
+| [_net/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_net/__init__.py) | Optional telemetry (opt-out) | Called from `underworld.__init__` on rank 0; isolated so telemetry can be disabled without affecting the numerical core. |
 
 ### 13.2 `underworld.container` (index sets and selection primitives)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [container/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/container/__init__.py) | Public exports | Exposes `IndexSet`, `ObjectifiedIndexSet`. |
-| [container/_indexset.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/container/_indexset.py) | Efficient integer sets | Provides set operations and interoperability; used by meshes for `specialSets` and by `conditions` to specify constrained DOFs. |
+| [container/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/container/__init__.py) | Public exports | Exposes `IndexSet`, `ObjectifiedIndexSet`. |
+| [container/_indexset.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/container/_indexset.py) | Efficient integer sets | Provides set operations and interoperability; used by meshes for `specialSets` and by `conditions` to specify constrained DOFs. |
 
 ### 13.3 `underworld.conditions` (boundary and system conditions)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [conditions/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/conditions/__init__.py) | Public exports | Re-exports `DirichletCondition`, `NeumannCondition`, `SystemCondition`. |
-| [conditions/_conditions.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/conditions/_conditions.py) | Condition implementations | `DirichletCondition` registers fixed DOFs on FE variables; `NeumannCondition` provides flux/traction via `fn.Function`. Consumed by `systems` during assembly (`FeVariable_SetBC` for Dirichlet; surface assembly terms for Neumann). |
+| [conditions/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/conditions/__init__.py) | Public exports | Re-exports `DirichletCondition`, `NeumannCondition`, `SystemCondition`. |
+| [conditions/_conditions.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/conditions/_conditions.py) | Condition implementations | `DirichletCondition` registers fixed DOFs on FE variables; `NeumannCondition` provides flux/traction via `fn.Function`. Consumed by `systems` during assembly (`FeVariable_SetBC` for Dirichlet; surface assembly terms for Neumann). |
 
 ### 13.4 `underworld.function` (core “math language”)
 
@@ -616,54 +765,54 @@ The function system is central by design: it is the common interface for coeffic
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [function/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/__init__.py) | Public API | Re-exports the `Function` framework and submodules as `underworld.function.*`. |
-| [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py) | Core function abstraction | Defines `Function` and `FunctionInput`, evaluation (`evaluate`, `evaluate_global`), conversion (`convert`), operator overloading, and links to the C backend via `libUnderworldPy.Function`. |
-| [function/math.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/math.py) | Math operators | `sin/cos/exp/log/sqrt/pow/dot/...` implemented as C-backed function nodes. |
-| [function/misc.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/misc.py) | Constants and basic ops | `constant`, `min`, `max`; used heavily by `Function.convert()` and rheology limiters. |
-| [function/branching.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/branching.py) | Conditional logic | `conditional` and `map` implement “if/switch” style function graphs (C-backed). |
-| [function/tensor.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/tensor.py) | Tensor helpers | Strain-rate/stress-style derived quantities: symmetric, deviatoric, second invariant. |
-| [function/shape.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/shape.py) | Geometric predicates | `Polygon` inclusion test; used for masks (materials, BC selection) and later mapped into IndexSets. |
-| [function/rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/rheology.py) | Rheology-specific helpers | Builds composite limiters (eg stress-limiting viscosity) using `tensor` + `branching`. |
-| [function/exception.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/exception.py) | Runtime guards | `SafeMaths` and `CustomException` wrap functions to fail fast on invalid values/conditions. |
-| [function/view.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/view.py) | Instrumentation views | `min_max` (tracks extrema, supports MPI global aggregation) and `count` (evaluation counters). |
-| [function/analytic.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/analytic.py) | Analytic solutions | Provides exact Stokes solutions as functions for verification and tutorials; also constructs example `DirichletCondition`s for benchmark setups. |
+| [function/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/__init__.py) | Public API | Re-exports the `Function` framework and submodules as `underworld.function.*`. |
+| [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py) | Core function abstraction | Defines `Function` and `FunctionInput`, evaluation (`evaluate`, `evaluate_global`), conversion (`convert`), operator overloading, and links to the C backend via `libUnderworldPy.Function`. |
+| [function/math.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/math.py) | Math operators | `sin/cos/exp/log/sqrt/pow/dot/...` implemented as C-backed function nodes. |
+| [function/misc.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/misc.py) | Constants and basic ops | `constant`, `min`, `max`; used heavily by `Function.convert()` and rheology limiters. |
+| [function/branching.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/branching.py) | Conditional logic | `conditional` and `map` implement “if/switch” style function graphs (C-backed). |
+| [function/tensor.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/tensor.py) | Tensor helpers | Strain-rate/stress-style derived quantities: symmetric, deviatoric, second invariant. |
+| [function/shape.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/shape.py) | Geometric predicates | `Polygon` inclusion test; used for masks (materials, BC selection) and later mapped into IndexSets. |
+| [function/rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/rheology.py) | Rheology-specific helpers | Builds composite limiters (eg stress-limiting viscosity) using `tensor` + `branching`. |
+| [function/exception.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/exception.py) | Runtime guards | `SafeMaths` and `CustomException` wrap functions to fail fast on invalid values/conditions. |
+| [function/view.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/view.py) | Instrumentation views | `min_max` (tracks extrema, supports MPI global aggregation) and `count` (evaluation counters). |
+| [function/analytic.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/analytic.py) | Analytic solutions | Provides exact Stokes solutions as functions for verification and tutorials; also constructs example `DirichletCondition`s for benchmark setups. |
 
 ### 13.5 `underworld.mesh` (meshes and FE field variables)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [mesh/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/__init__.py) | Public API | Exposes `FeMesh`, `FeMesh_Cartesian`, `MeshVariable`, and index set types. |
-| [mesh/_mesh.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_mesh.py) | Mesh implementation | Implements cartesian mesh generation, mesh deformation (`deform_mesh`), connectivity views, and `FeMesh_IndexSet`. Centralizes “domain geometry” and the conversion into native components. |
-| [mesh/_meshvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_meshvariable.py) | FE field variables | `MeshVariable` with numpy views and HDF5/XDMF save/load; used as unknown fields and coefficient fields for systems. |
-| [mesh/_specialSets_Cartesian.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_specialSets_Cartesian.py) | Boundary sets | Builds standard boundary IndexSets (Min/Max I/J/K, AllWalls) used throughout conditions, solvers, and examples. |
+| [mesh/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/__init__.py) | Public API | Exposes `FeMesh`, `FeMesh_Cartesian`, `MeshVariable`, and index set types. |
+| [mesh/_mesh.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_mesh.py) | Mesh implementation | Implements cartesian mesh generation, mesh deformation (`deform_mesh`), connectivity views, and `FeMesh_IndexSet`. Centralizes “domain geometry” and the conversion into native components. |
+| [mesh/_meshvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_meshvariable.py) | FE field variables | `MeshVariable` with numpy views and HDF5/XDMF save/load; used as unknown fields and coefficient fields for systems. |
+| [mesh/_specialSets_Cartesian.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_specialSets_Cartesian.py) | Boundary sets | Builds standard boundary IndexSets (Min/Max I/J/K, AllWalls) used throughout conditions, solvers, and examples. |
 
 ### 13.6 `underworld.swarm` (particles, integration swarms, population control)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [swarm/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/__init__.py) | Public API | Exposes `Swarm`, integration swarms, variables, and layouts. |
-| [swarm/_swarmabstract.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarmabstract.py) | Base swarm behavior | Defines common swarm lifecycle rules and safe management of numpy views under particle reallocation. |
-| [swarm/_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarm.py) | Material swarm | Particle ownership/migration, add/save/load, post-mesh-deform hooks, and helper masks. |
-| [swarm/_swarmvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarmvariable.py) | Per-particle fields | Typed particle data, HDF5/XDMF persistence, and lifecycle safety checks. |
-| [swarm/_integration_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_integration_swarm.py) | Quadrature point swarms | Gauss integration swarms and Voronoi integration swarms (PIC-friendly quadrature). |
-| [swarm/_weights.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_weights.py) | Voronoi/DVC weights | DVC/PCDVC weight computations used by Voronoi integration and population control. |
-| [swarm/_population_control.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_population_control.py) | Orchestration layer | User-facing population control management, delegates to native PICellerator helpers. |
-| [swarm/layouts.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/layouts.py) | Initialization layouts | Particle seeding layouts (Gauss, Sobol space-filler, random) used in examples and in higher-level workflows. |
+| [swarm/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/__init__.py) | Public API | Exposes `Swarm`, integration swarms, variables, and layouts. |
+| [swarm/_swarmabstract.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarmabstract.py) | Base swarm behavior | Defines common swarm lifecycle rules and safe management of numpy views under particle reallocation. |
+| [swarm/_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarm.py) | Material swarm | Particle ownership/migration, add/save/load, post-mesh-deform hooks, and helper masks. |
+| [swarm/_swarmvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarmvariable.py) | Per-particle fields | Typed particle data, HDF5/XDMF persistence, and lifecycle safety checks. |
+| [swarm/_integration_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_integration_swarm.py) | Quadrature point swarms | Gauss integration swarms and Voronoi integration swarms (PIC-friendly quadrature). |
+| [swarm/_weights.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_weights.py) | Voronoi/DVC weights | DVC/PCDVC weight computations used by Voronoi integration and population control. |
+| [swarm/_population_control.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_population_control.py) | Orchestration layer | User-facing population control management, delegates to native PICellerator helpers. |
+| [swarm/layouts.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/layouts.py) | Initialization layouts | Particle seeding layouts (Gauss, Sobol space-filler, random) used in examples and in higher-level workflows. |
 
 ### 13.7 `underworld.systems` (PDE construction and solver front-ends)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [systems/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/__init__.py) | Public API | Exposes PDE system builders and solver facades, including `Solver = _Solver.factory`. |
-| [systems/_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_solver.py) | Solver dispatch | Chooses concrete solver class based on system type to keep user-facing API small. |
-| [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py) | Stokes system builder | Assembles the Stokes SLE components and terms; supports different quadrature strategies. |
-| [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py) | Stokes solver | PETSc-based block Schur complement solver (BSSCR) with MG and nonlinear loop options. |
-| [systems/_options.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_options.py) | PETSc options | Option containers/presets for KSP/PC configuration. |
-| [systems/_thermal.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_thermal.py) | Steady-state heat | Diffusion + sources + flux terms assembly into a linear system. |
-| [systems/_energy_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_energy_solver.py) | Heat/linear solver | PETSc-backed solver wrapper used for heat, Darcy, projection, and general linear solves. |
-| [systems/_darcyflow.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_darcyflow.py) | Darcy flow | Builds Darcy pressure system and optionally reconstructs velocity via projection. |
-| [systems/_timeintegration.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_timeintegration.py) | Time stepping | Swarm advection and time integration wrappers around native integrators. |
-| [systems/_advectiondiffusion.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_advectiondiffusion.py) | Advection–diffusion | Chooses SUPG (native) or SLCN (Python-orchestrated semi-Lagrangian + CN diffusion) paths. |
+| [systems/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/__init__.py) | Public API | Exposes PDE system builders and solver facades, including `Solver = _Solver.factory`. |
+| [systems/_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_solver.py) | Solver dispatch | Chooses concrete solver class based on system type to keep user-facing API small. |
+| [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py) | Stokes system builder | Assembles the Stokes SLE components and terms; supports different quadrature strategies. |
+| [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py) | Stokes solver | PETSc-based block Schur complement solver (BSSCR) with MG and nonlinear loop options. |
+| [systems/_options.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_options.py) | PETSc options | Option containers/presets for KSP/PC configuration. |
+| [systems/_thermal.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_thermal.py) | Steady-state heat | Diffusion + sources + flux terms assembly into a linear system. |
+| [systems/_energy_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_energy_solver.py) | Heat/linear solver | PETSc-backed solver wrapper used for heat, Darcy, projection, and general linear solves. |
+| [systems/_darcyflow.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_darcyflow.py) | Darcy flow | Builds Darcy pressure system and optionally reconstructs velocity via projection. |
+| [systems/_timeintegration.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_timeintegration.py) | Time stepping | Swarm advection and time integration wrappers around native integrators. |
+| [systems/_advectiondiffusion.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_advectiondiffusion.py) | Advection–diffusion | Chooses SUPG (native) or SLCN (Python-orchestrated semi-Lagrangian + CN diffusion) paths. |
 
 #### 13.7.1 `underworld.systems.sle` (assembly building blocks)
 
@@ -671,40 +820,40 @@ These files implement the “linear algebra object model” for PDE assembly: eq
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [systems/sle/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/__init__.py) | Public exports | Collects SLE primitives into a clean namespace. |
-| [systems/sle/_eqnum.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_eqnum.py) | Equation numbering | Maps mesh variable DOFs to equation ids, optionally removing Dirichlet DOFs. |
-| [systems/sle/_svector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_svector.py) | Solution vector | Couples a `MeshVariable` and `EqNumber` to a native solution vector. |
-| [systems/sle/_assembledvector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_assembledvector.py) | RHS vector | Force/load vector wrapper around a native assembled vector. |
-| [systems/sle/_assembledmatrix.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_assembledmatrix.py) | Assembled matrix | Stiffness/operator matrix wrapper that connects row/col variables and eqnums. |
-| [systems/sle/_assemblyterm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_assemblyterm.py) | Assembly terms | Family of matrix/vector term wrappers (volume/surface contributions) reused by Stokes/heat/diffusion systems. |
-| [systems/sle/_augstokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_augstokes.py) | Augmented Stokes helpers | Penalty/augmented-Lagrangian related helpers used by solver paths. |
-| [systems/sle/_fvector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/sle/_fvector.py) | Force vector helpers | Small specializations around assembled vectors used by some systems. |
+| [systems/sle/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/__init__.py) | Public exports | Collects SLE primitives into a clean namespace. |
+| [systems/sle/_eqnum.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_eqnum.py) | Equation numbering | Maps mesh variable DOFs to equation ids, optionally removing Dirichlet DOFs. |
+| [systems/sle/_svector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_svector.py) | Solution vector | Couples a `MeshVariable` and `EqNumber` to a native solution vector. |
+| [systems/sle/_assembledvector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_assembledvector.py) | RHS vector | Force/load vector wrapper around a native assembled vector. |
+| [systems/sle/_assembledmatrix.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_assembledmatrix.py) | Assembled matrix | Stiffness/operator matrix wrapper that connects row/col variables and eqnums. |
+| [systems/sle/_assemblyterm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_assemblyterm.py) | Assembly terms | Family of matrix/vector term wrappers (volume/surface contributions) reused by Stokes/heat/diffusion systems. |
+| [systems/sle/_augstokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_augstokes.py) | Augmented Stokes helpers | Penalty/augmented-Lagrangian related helpers used by solver paths. |
+| [systems/sle/_fvector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/sle/_fvector.py) | Force vector helpers | Small specializations around assembled vectors used by some systems. |
 
 ### 13.8 `underworld.utils` (I/O, integration, projection)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [utils/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/utils/__init__.py) | Public API | Exposes integration, I/O, projection, solver helpers. |
-| [utils/_io.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/utils/_io.py) | HDF5 I/O strategy | Chooses between MPI-IO and rank-ordered serial I/O automatically to work across builds and platforms. |
-| [utils/_utils.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/utils/_utils.py) | Integration + XDMF | `Integral`, XDMF schema writers, progress bar, misc helpers used across mesh/swarm save/load. |
-| [utils/_meshvariable_projection.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/utils/_meshvariable_projection.py) | Projection + generic linear solve | `MeshVariable_Projection` and `SolveLinearSystem` are reusable linear workflows used by Darcy and various postprocessing tasks. |
+| [utils/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/utils/__init__.py) | Public API | Exposes integration, I/O, projection, solver helpers. |
+| [utils/_io.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/utils/_io.py) | HDF5 I/O strategy | Chooses between MPI-IO and rank-ordered serial I/O automatically to work across builds and platforms. |
+| [utils/_utils.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/utils/_utils.py) | Integration + XDMF | `Integral`, XDMF schema writers, progress bar, misc helpers used across mesh/swarm save/load. |
+| [utils/_meshvariable_projection.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/utils/_meshvariable_projection.py) | Projection + generic linear solve | `MeshVariable_Projection` and `SolveLinearSystem` are reusable linear workflows used by Darcy and various postprocessing tasks. |
 
 ### 13.9 `underworld.visualisation` (data → render)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [visualisation/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/visualisation/__init__.py) | Public API | Exposes `Store/Figure/Viewer/objects`, sets up headless rendering if needed. |
-| [visualisation/_glucifer.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/visualisation/_glucifer.py) | Backend integration | Orchestrates interaction with LavaVu/gLucifer and handles database and rendering flow. |
-| [visualisation/objects.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/visualisation/objects.py) | Drawing primitives | Mesh/surface/points/contours/vector glyph objects; evaluates functions and writes per-rank geometry to the Store. |
-| [visualisation/lavavu_null.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/visualisation/lavavu_null.py) | Fallback shim | Keeps the package importable when LavaVu is unavailable. |
+| [visualisation/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/visualisation/__init__.py) | Public API | Exposes `Store/Figure/Viewer/objects`, sets up headless rendering if needed. |
+| [visualisation/_glucifer.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/visualisation/_glucifer.py) | Backend integration | Orchestrates interaction with LavaVu/gLucifer and handles database and rendering flow. |
+| [visualisation/objects.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/visualisation/objects.py) | Drawing primitives | Mesh/surface/points/contours/vector glyph objects; evaluates functions and writes per-rank geometry to the Store. |
+| [visualisation/lavavu_null.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/visualisation/lavavu_null.py) | Fallback shim | Keeps the package importable when LavaVu is unavailable. |
 
 ### 13.10 `underworld.scaling` (units and nondimensionalisation)
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [scaling/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/scaling/__init__.py) | Public API | Exposes `non_dimensionalise`, `dimensionalise`, `units`, and coefficient helpers. |
-| [scaling/_scaling.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/scaling/_scaling.py) | Scaling core | Pint-based dimensional analysis and conversions; supports scaling `MeshVariable` and `SwarmVariable` data arrays. |
-| [scaling/_utils.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/scaling/_utils.py) | Dict helper | `TransformedDict` normalizes keys and enforces base unit invariants for scaling coefficient storage. |
+| [scaling/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/scaling/__init__.py) | Public API | Exposes `non_dimensionalise`, `dimensionalise`, `units`, and coefficient helpers. |
+| [scaling/_scaling.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/scaling/_scaling.py) | Scaling core | Pint-based dimensional analysis and conversions; supports scaling `MeshVariable` and `SwarmVariable` data arrays. |
+| [scaling/_utils.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/scaling/_utils.py) | Dict helper | `TransformedDict` normalizes keys and enforces base unit invariants for scaling coefficient storage. |
 
 ### 13.11 `underworld.libUnderworld` (Python packaging for native wrappers)
 
@@ -712,11 +861,11 @@ This is not “numerical logic in Python”; it is the packaging/import layer fo
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [libUnderworld/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/__init__.py) | Wrapper package entry | Imports everything from `libUnderworldPy` so `import underworld.libUnderworld as _libUnderworld` works during bootstrap. |
-| [libUnderworld/libUnderworldPy/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/__init__.py) | Imports extension modules | Imports `StGermain/StgDomain/StgFEM/Solvers/PICellerator/Underworld/gLucifer` plus helpers (`petsc`, `Function`) which are SWIG-built `.so` modules. |
-| [libUnderworld/gLucifer/SysTest/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/gLucifer/SysTest/__init__.py) | SysTest package | Test harness packaging for gLucifer. |
-| [libUnderworld/gLucifer/SysTest/testLuc.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/gLucifer/SysTest/testLuc.py) | Visualisation system test | Legacy test utilities for the visualisation toolchain. |
-| [libUnderworld/StGermain/pcu/script/pcutest.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/pcu/script/pcutest.py) | PCU test runner | Utility to run PCU (C unit test framework) suites; relevant mainly for core developers. |
+| [libUnderworld/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/__init__.py) | Wrapper package entry | Imports everything from `libUnderworldPy` so `import underworld.libUnderworld as _libUnderworld` works during bootstrap. |
+| [libUnderworld/libUnderworldPy/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/__init__.py) | Imports extension modules | Imports `StGermain/StgDomain/StgFEM/Solvers/PICellerator/Underworld/gLucifer` plus helpers (`petsc`, `Function`) which are SWIG-built `.so` modules. |
+| [libUnderworld/gLucifer/SysTest/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/gLucifer/SysTest/__init__.py) | SysTest package | Test harness packaging for gLucifer. |
+| [libUnderworld/gLucifer/SysTest/testLuc.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/gLucifer/SysTest/testLuc.py) | Visualisation system test | Legacy test utilities for the visualisation toolchain. |
+| [libUnderworld/StGermain/pcu/script/pcutest.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/pcu/script/pcutest.py) | PCU test runner | Utility to run PCU (C unit test framework) suites; relevant mainly for core developers. |
 
 ## 14. Python source tour: `underworld.UWGeodynamics` (workflow layer)
 
@@ -726,23 +875,23 @@ UWGeodynamics provides a geodynamics-focused workflow layer that composes core `
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [UWGeodynamics/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/__init__.py) | Public GEO API + config discovery | Exposes `Model`, `Material`, rheologies/densities/melt, registries, and scaling shortcuts (`nd/dim/u`). Also implements a config-dir discovery pattern (matplotlib-like) to make tutorial defaults reproducible. |
-| [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py) | Orchestration hub | Creates mesh + swarm + standard fields, manages BCs, free surface, remeshing, isostasy, surface processes, and connects to core solvers. Designed to let tutorials focus on “model intent” rather than wiring. |
-| [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py) | Material container | Stores density/viscosity/plasticity/melt parameters with unit validation; provides a consistent interface for building composite coefficient functions later consumed by solver assembly. |
-| [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py) | Rheology definitions | Implements viscous/plastic/elastic laws and limiters mostly as `fn.Function` graphs; “functions all the way down” keeps performance in the compiled evaluator. |
-| [UWGeodynamics/_density.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_density.py) | Density laws | Constant/linear density models producing `fn.Function` expressions used for buoyancy and lithostatic calculations. |
-| [UWGeodynamics/_melt.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_melt.py) | Solidus/liquidus + registries | JSON-backed polynomial parametrizations and registries to standardize melt phase relations. |
-| [UWGeodynamics/_boundary_conditions.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py) | Model-aware BC wrappers | Translates “walls/materials/nodesets/shapes” into core `uw.conditions.*` objects; supports Pint quantities and `fn.Function` values. |
-| [UWGeodynamics/_utils.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_utils.py) | Workflow helpers | Passive tracers, pressure smoothing, phase-change helpers, inflow/outflow balancing utilities; designed to be reusable across tutorials. |
-| [UWGeodynamics/_freesurface.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_freesurface.py) | Free surface driver | Implements mesh deformation driven by top boundary velocity, then smoothes interior by solving a diffusion-like system on a helper mesh. |
-| [UWGeodynamics/_mesh_advector.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py) | Mesh advection helper | Updates mesh coordinates based on boundary velocities; designed for regular meshes and workflow convenience. |
-| [UWGeodynamics/_remeshing.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_remeshing.py) | Remeshing/remapping | Re-parameterizes mesh spacing (piecewise or field-driven), optionally adaptive via hooks into the model’s solve loop. |
-| [UWGeodynamics/_frictional_boundary.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_frictional_boundary.py) | Boundary friction masks | Builds wall masks as mesh variables and exposes friction coefficient fields as a conditional function. |
-| [UWGeodynamics/_visugrid.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_visugrid.py) | Auxiliary visualization grid | Maintains a lightweight grid that can be advected and robustly sampled (KD-tree at boundaries). |
-| [UWGeodynamics/_rcParams.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rcParams.py) | Defaults and validators | Declares UWGeo defaults for solvers, output, swarm density, etc., validating values before model construction. |
-| [UWGeodynamics/_validate.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_validate.py) | Validation helpers | Shared validators for rcParams and registry lookup; separates “policy/validation” from “model orchestration”. |
-| [UWGeodynamics/shapes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/shapes.py) | Geometry primitives | Convenience masks (Polygon, HalfSpace, Layer, Box, Sphere, Annulus) implemented as functions; used for material assignment and BC selection. |
-| [UWGeodynamics/surfaceProcesses.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py) | Surface process coupling | Framework + Badlands coupling, typically rank-0 driven with MPI broadcasts for consistent state. |
+| [UWGeodynamics/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/__init__.py) | Public GEO API + config discovery | Exposes `Model`, `Material`, rheologies/densities/melt, registries, and scaling shortcuts (`nd/dim/u`). Also implements a config-dir discovery pattern (matplotlib-like) to make tutorial defaults reproducible. |
+| [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py) | Orchestration hub | Creates mesh + swarm + standard fields, manages BCs, free surface, remeshing, isostasy, surface processes, and connects to core solvers. Designed to let tutorials focus on “model intent” rather than wiring. |
+| [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py) | Material container | Stores density/viscosity/plasticity/melt parameters with unit validation; provides a consistent interface for building composite coefficient functions later consumed by solver assembly. |
+| [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py) | Rheology definitions | Implements viscous/plastic/elastic laws and limiters mostly as `fn.Function` graphs; “functions all the way down” keeps performance in the compiled evaluator. |
+| [UWGeodynamics/_density.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_density.py) | Density laws | Constant/linear density models producing `fn.Function` expressions used for buoyancy and lithostatic calculations. |
+| [UWGeodynamics/_melt.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_melt.py) | Solidus/liquidus + registries | JSON-backed polynomial parametrizations and registries to standardize melt phase relations. |
+| [UWGeodynamics/_boundary_conditions.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py) | Model-aware BC wrappers | Translates “walls/materials/nodesets/shapes” into core `uw.conditions.*` objects; supports Pint quantities and `fn.Function` values. |
+| [UWGeodynamics/_utils.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_utils.py) | Workflow helpers | Passive tracers, pressure smoothing, phase-change helpers, inflow/outflow balancing utilities; designed to be reusable across tutorials. |
+| [UWGeodynamics/_freesurface.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_freesurface.py) | Free surface driver | Implements mesh deformation driven by top boundary velocity, then smoothes interior by solving a diffusion-like system on a helper mesh. |
+| [UWGeodynamics/_mesh_advector.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_mesh_advector.py) | Mesh advection helper | Updates mesh coordinates based on boundary velocities; designed for regular meshes and workflow convenience. |
+| [UWGeodynamics/_remeshing.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_remeshing.py) | Remeshing/remapping | Re-parameterizes mesh spacing (piecewise or field-driven), optionally adaptive via hooks into the model’s solve loop. |
+| [UWGeodynamics/_frictional_boundary.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_frictional_boundary.py) | Boundary friction masks | Builds wall masks as mesh variables and exposes friction coefficient fields as a conditional function. |
+| [UWGeodynamics/_visugrid.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_visugrid.py) | Auxiliary visualization grid | Maintains a lightweight grid that can be advected and robustly sampled (KD-tree at boundaries). |
+| [UWGeodynamics/_rcParams.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rcParams.py) | Defaults and validators | Declares UWGeo defaults for solvers, output, swarm density, etc., validating values before model construction. |
+| [UWGeodynamics/_validate.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_validate.py) | Validation helpers | Shared validators for rcParams and registry lookup; separates “policy/validation” from “model orchestration”. |
+| [UWGeodynamics/shapes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/shapes.py) | Geometry primitives | Convenience masks (Polygon, HalfSpace, Layer, Box, Sphere, Annulus) implemented as functions; used for material assignment and BC selection. |
+| [UWGeodynamics/surfaceProcesses.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/surfaceProcesses.py) | Surface process coupling | Framework + Badlands coupling, typically rank-0 driven with MPI broadcasts for consistent state. |
 
 ### 14.2 Subpackages
 
@@ -750,30 +899,30 @@ UWGeodynamics provides a geodynamics-focused workflow layer that composes core `
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [postprocessing/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/postprocessing/__init__.py) | Public exports | Re-exports tracer/log readers. |
-| [postprocessing/_tracers.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/postprocessing/_tracers.py) | Passive tracer reader | Reads `PassiveTracers` HDF5 outputs and builds tabular datasets across checkpoints. |
-| [postprocessing/_logFile.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/postprocessing/_logFile.py) | Log parser | Extracts nonlinear solver blocks and timing/convergence metrics from text logs. |
+| [postprocessing/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/postprocessing/__init__.py) | Public exports | Re-exports tracer/log readers. |
+| [postprocessing/_tracers.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/postprocessing/_tracers.py) | Passive tracer reader | Reads `PassiveTracers` HDF5 outputs and builds tabular datasets across checkpoints. |
+| [postprocessing/_logFile.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/postprocessing/_logFile.py) | Log parser | Extracts nonlinear solver blocks and timing/convergence metrics from text logs. |
 
 #### 14.2.2 `UWGeodynamics.utilities`
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [utilities/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/utilities/__init__.py) | Public exports | Exposes ASCII conversion utilities. |
-| [utilities/UWtoAscii.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/utilities/UWtoAscii.py) | Output conversion tool | Converts UW XDMF+HDF5 outputs to simple ASCII columns for interoperability and quick inspection. |
+| [utilities/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/utilities/__init__.py) | Public exports | Exposes ASCII conversion utilities. |
+| [utilities/UWtoAscii.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/utilities/UWtoAscii.py) | Output conversion tool | Converts UW XDMF+HDF5 outputs to simple ASCII columns for interoperability and quick inspection. |
 
 #### 14.2.3 `UWGeodynamics.LecodeIsostasy`
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [LecodeIsostasy/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/LecodeIsostasy/__init__.py) | Public export | Exposes `LecodeIsostasy`. |
-| [LecodeIsostasy/LecodeIsostasy.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/LecodeIsostasy/LecodeIsostasy.py) | Isostasy solver | Computes column mass balance and prescribes basal velocities; uses projections (`MeshVariable_Projection`) and mesh `specialSets`. |
+| [LecodeIsostasy/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/LecodeIsostasy/__init__.py) | Public export | Exposes `LecodeIsostasy`. |
+| [LecodeIsostasy/LecodeIsostasy.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/LecodeIsostasy/LecodeIsostasy.py) | Isostasy solver | Computes column mass balance and prescribes basal velocities; uses projections (`MeshVariable_Projection`) and mesh `specialSets`. |
 
 #### 14.2.4 `UWGeodynamics.lithopress`
 
 | File | Role in the system | Key interactions / why it exists |
 |---|---|---|
-| [lithopress/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/lithopress/__init__.py) | Public export | Exposes `Lithostatic_pressure`. |
-| [lithopress/lithopress.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/lithopress/lithopress.py) | Lithostatic pressure calculator | Computes lithostatics by integrating density vertically; returns a `MeshVariable` useful for diagnostics and solver normalization. |
+| [lithopress/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/lithopress/__init__.py) | Public export | Exposes `Lithostatic_pressure`. |
+| [lithopress/lithopress.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/lithopress/lithopress.py) | Lithostatic pressure calculator | Computes lithostatics by integrating density vertically; returns a `MeshVariable` useful for diagnostics and solver normalization. |
 
 ## 15. Native C core: what `StGermain` really is
 
@@ -832,27 +981,27 @@ flowchart TB
 
 The native framework code is in:
 
-- [StGermain](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain)
+- [StGermain](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain)
 
 The most important subdirectories are:
 
 | Directory | What it provides | Why it matters |
 |---|---|---|
-| [Base/Foundation](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation) | `Stg_Class`, `Stg_Object`, memory, logging | Gives C code object-like structure and lifecycle primitives. |
-| [Base/Container](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Container) | Lists, maps, sets, trees, memory pools | Shared data structures used across the whole codebase. |
-| [Base/IO](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/IO) | Dictionaries, XML, streams, journal/logging | Configuration and structured runtime input. |
-| [Base/Automation](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation) | `Stg_Component`, component factories, lifecycle control | This is the heart of the component model. |
-| [Base/Extensibility](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility) | modules, plugins, toolboxes, hooks | Makes the codebase modular and dynamically loadable. |
-| [Base/Context](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Context) | execution contexts, variables, PythonVC | Bridges runtime state and variable-condition style workflows. |
-| [Utils](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Utils) | small utility helpers | Convenience utilities used across the framework. |
-| [libStGermain](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/libStGermain) | umbrella init/finalise layer | Combines the submodules into the actual `StGermain` library entrypoint. |
+| [Base/Foundation](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation) | `Stg_Class`, `Stg_Object`, memory, logging | Gives C code object-like structure and lifecycle primitives. |
+| [Base/Container](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Container) | Lists, maps, sets, trees, memory pools | Shared data structures used across the whole codebase. |
+| [Base/IO](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/IO) | Dictionaries, XML, streams, journal/logging | Configuration and structured runtime input. |
+| [Base/Automation](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation) | `Stg_Component`, component factories, lifecycle control | This is the heart of the component model. |
+| [Base/Extensibility](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility) | modules, plugins, toolboxes, hooks | Makes the codebase modular and dynamically loadable. |
+| [Base/Context](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Context) | execution contexts, variables, PythonVC | Bridges runtime state and variable-condition style workflows. |
+| [Utils](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/Utils) | small utility helpers | Convenience utilities used across the framework. |
+| [libStGermain](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StGermain/libStGermain) | umbrella init/finalise layer | Combines the submodules into the actual `StGermain` library entrypoint. |
 
 ### 15.4 The core design: object model + component lifecycle
 
 Two native files are especially important:
 
-- [Class.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Class.c)
-- [Stg_Component.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_Component.c)
+- [Class.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Class.c)
+- [Stg_Component.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_Component.c)
 
 These implement the idea that native objects are not just structs; they are **components with a standard lifecycle**.
 
@@ -873,7 +1022,7 @@ Why this design is useful:
 
 ### 15.5 How Python uses `StGermain`
 
-The Python file [underworld/_stgermain.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py) is the bridge layer.
+The Python file [underworld/_stgermain.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py) is the bridge layer.
 
 Key idea:
 
@@ -883,14 +1032,14 @@ Key idea:
 
 Important Python wrapper classes:
 
-- [StgClass](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L50-L98): owns a native pointer and handles lock/unlock/delete safely.
-- [StgCompoundComponent](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L132-L257): creates multiple related native components and exposes them as one Python object.
+- [StgClass](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L50-L98): owns a native pointer and handles lock/unlock/delete safely.
+- [StgCompoundComponent](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L132-L257): creates multiple related native components and exposes them as one Python object.
 
 Important runtime calls:
 
-- `StgInit(...)` from [StGermain_Tools.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L20-L43)
-- `_stgermain.LoadModules(...)` in [underworld/_stgermain.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L330-L346)
-- `StgCreateInstances(...)` / `StgConstruct(...)` in [underworld/_stgermain.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py#L348-L417)
+- `StgInit(...)` from [StGermain_Tools.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L20-L43)
+- `_stgermain.LoadModules(...)` in [underworld/_stgermain.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L330-L346)
+- `StgCreateInstances(...)` / `StgConstruct(...)` in [underworld/_stgermain.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py#L348-L417)
 
 That is the real reason the Python API can be so high-level: Python is not manually constructing dozens of C structs one by one; it is delegating that orchestration to `StGermain`.
 
@@ -913,16 +1062,16 @@ Without `StGermain`, the codebase would still need another framework layer to ma
 
 | File | What it does | Why it is important |
 |---|---|---|
-| [libStGermain/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/libStGermain/src/Init.c) | Top-level `StGermain_Init()` | This is the native umbrella init that chains Foundation, IO, Container, Automation, Extensibility, Context, and Utils. |
-| [Base/Foundation/src/Class.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Class.c) | Base class system | Native object semantics and low-level lifecycle support. |
-| [Base/Foundation/src/Object.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Object.c) | Named object layer | Adds identity/name semantics on top of `Stg_Class`. |
-| [Base/Automation/src/Stg_Component.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_Component.c) | Component lifecycle | Core execution protocol for nearly all major native objects. |
-| [Base/Automation/src/Stg_ComponentFactory.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_ComponentFactory.c) | Component factory | Builds components from dictionaries/XML. |
-| [Base/Extensibility/src/ModulesManager.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c) | Module loader | Dynamic loading of toolboxes/modules, used during `import underworld`. |
-| [Base/Extensibility/src/Module.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/Module.c) | Individual module wrapper | `dlopen/dlsym`-based dynamic module handling. |
-| [Base/IO/src/XML_IO_Handler.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/IO/src/XML_IO_Handler.c) | XML configuration parser | Lets the framework describe components/toolboxes in a structured configuration form. |
-| [Base/Context/src/AbstractContext.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Context/src/AbstractContext.c) | Runtime context | Defines execution entry points and runtime state handling. |
-| [Base/Context/src/PythonVC.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StGermain/Base/Context/src/PythonVC.c) | Python variable-condition bridge | One of the pieces that helps Python-defined conditions interact with native execution. |
+| [libStGermain/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/libStGermain/src/Init.c) | Top-level `StGermain_Init()` | This is the native umbrella init that chains Foundation, IO, Container, Automation, Extensibility, Context, and Utils. |
+| [Base/Foundation/src/Class.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Class.c) | Base class system | Native object semantics and low-level lifecycle support. |
+| [Base/Foundation/src/Object.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Foundation/src/Object.c) | Named object layer | Adds identity/name semantics on top of `Stg_Class`. |
+| [Base/Automation/src/Stg_Component.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_Component.c) | Component lifecycle | Core execution protocol for nearly all major native objects. |
+| [Base/Automation/src/Stg_ComponentFactory.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Automation/src/Stg_ComponentFactory.c) | Component factory | Builds components from dictionaries/XML. |
+| [Base/Extensibility/src/ModulesManager.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/ModulesManager.c) | Module loader | Dynamic loading of toolboxes/modules, used during `import underworld`. |
+| [Base/Extensibility/src/Module.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Extensibility/src/Module.c) | Individual module wrapper | `dlopen/dlsym`-based dynamic module handling. |
+| [Base/IO/src/XML_IO_Handler.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/IO/src/XML_IO_Handler.c) | XML configuration parser | Lets the framework describe components/toolboxes in a structured configuration form. |
+| [Base/Context/src/AbstractContext.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Context/src/AbstractContext.c) | Runtime context | Defines execution entry points and runtime state handling. |
+| [Base/Context/src/PythonVC.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StGermain/Base/Context/src/PythonVC.c) | Python variable-condition bridge | One of the pieces that helps Python-defined conditions interact with native execution. |
 
 ## 16. Where PETSc is in Underworld, and what it does
 
@@ -936,7 +1085,7 @@ Underworld uses **PETSc for sparse linear algebra and solver infrastructure**, b
 
 The main discovery point is:
 
-- [libUnderworld/CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L17-L35)
+- [libUnderworld/CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L17-L35)
 
 What happens there:
 
@@ -947,16 +1096,16 @@ What happens there:
 
 PETSc include directories are then injected globally:
 
-- [CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L56-L61)
+- [CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L56-L61)
 
 PETSc libraries are linked into the native libraries:
 
 - `StGermain`, `StgDomain`, `StgFEM`, `PICellerator`, `Underworld`, `gLucifer`, `Solvers`
-- see [CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L85-L205)
+- see [CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/CMakeLists.txt#L85-L205)
 
 PETSc is also linked into the SWIG Python extension modules:
 
-- [libUnderworldPy/CMakeLists.txt](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/CMakeLists.txt#L47-L105)
+- [libUnderworldPy/CMakeLists.txt](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/CMakeLists.txt#L47-L105)
 
 This means PETSc is not an optional add-on at runtime; it is part of the compiled backbone of Underworld.
 
@@ -964,13 +1113,13 @@ This means PETSc is not an optional add-on at runtime; it is part of the compile
 
 Two places are important:
 
-- Python-side startup enters via [StGermain_Tools.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L20-L43), which handles `MPI_Init` and `StGermain_Init`.
-- PETSc itself is initialized deeper in the native FEM layer in [StgFEM/Discretisation/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L86-L91), where `PetscInitialize(...)` is called.
+- Python-side startup enters via [StGermain_Tools.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L20-L43), which handles `MPI_Init` and `StGermain_Init`.
+- PETSc itself is initialized deeper in the native FEM layer in [StgFEM/Discretisation/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L86-L91), where `PetscInitialize(...)` is called.
 
 Finalization also appears in two places:
 
-- Python finalization path: [StGermain_Tools.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L46-L59)
-- native FEM finalization path: [StgFEM/Discretisation/src/Finalise.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Finalise.c#L22-L33)
+- Python finalization path: [StGermain_Tools.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/StGermain_Tools.c#L46-L59)
+- native FEM finalization path: [StgFEM/Discretisation/src/Finalise.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Finalise.c#L22-L33)
 
 This reflects the architecture: PETSc is embedded into the Underworld native lifecycle rather than managed directly from Python user code.
 
@@ -980,12 +1129,12 @@ The most important PETSc-heavy native files are:
 
 | File | PETSc role | What it means in practice |
 |---|---|---|
-| [StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c) | generic SLE + SNES/KSP infrastructure | Creates PETSc `Vec/Mat`, and in nonlinear mode configures `SNES`, Jacobians, residuals, and solve flow. |
-| [StgFEM/SLE/SystemSetup/src/PETScMGSolver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/PETScMGSolver.c) | multigrid wrapper | Creates PETSc `KSP`/`PCMG` objects for multigrid hierarchies. |
-| [StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c) | heat/linear solves | Uses PETSc `KSP` for steady-state heat, Darcy, and related scalar systems. |
-| [Solvers/KSPSolvers/src/StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c) | block Stokes solver interface | Builds PETSc nested matrices/vectors and drives Stokes solves through a custom KSP pathway. |
-| [Solvers/KSPSolvers/src/BSSCR/BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c) | custom PETSc KSP type | Registers and implements the `bsscr` KSP type used by default for block Schur complement Stokes solves. |
-| [Solvers/KSPSolvers/src/ksp-register.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c) | custom KSP registration | Registers Underworld-specific PETSc KSP types. |
+| [StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c) | generic SLE + SNES/KSP infrastructure | Creates PETSc `Vec/Mat`, and in nonlinear mode configures `SNES`, Jacobians, residuals, and solve flow. |
+| [StgFEM/SLE/SystemSetup/src/PETScMGSolver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/PETScMGSolver.c) | multigrid wrapper | Creates PETSc `KSP`/`PCMG` objects for multigrid hierarchies. |
+| [StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c) | heat/linear solves | Uses PETSc `KSP` for steady-state heat, Darcy, and related scalar systems. |
+| [Solvers/KSPSolvers/src/StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c) | block Stokes solver interface | Builds PETSc nested matrices/vectors and drives Stokes solves through a custom KSP pathway. |
+| [Solvers/KSPSolvers/src/BSSCR/BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c) | custom PETSc KSP type | Registers and implements the `bsscr` KSP type used by default for block Schur complement Stokes solves. |
+| [Solvers/KSPSolvers/src/ksp-register.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c) | custom KSP registration | Registers Underworld-specific PETSc KSP types. |
 
 ### 16.4 The default Stokes solve path
 
@@ -1021,13 +1170,13 @@ flowchart TB
 
 The main source locations for this chain are:
 
-- Python Stokes system assembly: [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py)
-- Python solver factory: [systems/_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_solver.py#L18-L35)
-- Python Stokes solver front-end: [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py)
-- generic native execution pipeline: [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L477-L491)
-- native solver interface: [SLE_Solver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SLE_Solver.c#L182-L212)
-- default native Stokes solver: [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
-- custom PETSc KSP type: [BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
+- Python Stokes system assembly: [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py)
+- Python solver factory: [systems/_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_solver.py#L18-L35)
+- Python Stokes solver front-end: [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py)
+- generic native execution pipeline: [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L477-L491)
+- native solver interface: [SLE_Solver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SLE_Solver.c#L182-L212)
+- default native Stokes solver: [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
+- custom PETSc KSP type: [BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
 
 ### 16.5 Why the Stokes path is not “just call PETSc directly”
 
@@ -1062,7 +1211,7 @@ Python does not receive full direct bindings to all PETSc APIs. Instead, it gets
 
 The main SWIG wrapper is:
 
-- [libUnderworldPy/petsc.i](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/petsc.i#L31-L67)
+- [libUnderworldPy/petsc.i](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/petsc.i#L31-L67)
 
 This exposes utilities such as:
 
@@ -1076,8 +1225,8 @@ This exposes utilities such as:
 
 These are then used in Python solver front-ends:
 
-- [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py)
-- [systems/_energy_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_energy_solver.py)
+- [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py)
+- [systems/_energy_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_energy_solver.py)
 
 This design keeps Python solver code concise:
 
@@ -1120,11 +1269,11 @@ In other words:
 
 The native umbrella module is:
 
-- [StgDomain.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/libStgDomain/src/StgDomain.h#L11-L23)
+- [StgDomain.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/libStgDomain/src/StgDomain.h#L11-L23)
 
 Its top-level init is:
 
-- [libStgDomain/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/libStgDomain/src/Init.c#L23-L48)
+- [libStgDomain/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/libStgDomain/src/Init.c#L23-L48)
 
 That init function shows exactly how `StgDomain` is meant to be read: it is not one single subsystem, but a grouped domain layer containing five major submodules:
 
@@ -1160,18 +1309,18 @@ PETSc does not provide these concepts for Underworld; PETSc provides algebra and
 
 | Submodule | Main idea | What it contributes to Underworld |
 |---|---|---|
-| [Geometry](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Geometry) | low-level geometry math | vectors, tensors, trig helpers, simplex operations |
-| [Shape](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Shape) | spatial predicates and regions | polygons, convex hulls, and general “inside/outside” logic |
-| [Mesh](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Mesh) | mesh topology and mesh variables | the main spatial discretization container |
-| [Utils](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Utils) | domain utilities | field variables, dof layout, domain context, time integration helpers |
-| [Swarm](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Swarm) | particles and particle data | material points, swarm variables, layout, migration, shadow sync |
+| [Geometry](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgDomain/Geometry) | low-level geometry math | vectors, tensors, trig helpers, simplex operations |
+| [Shape](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgDomain/Shape) | spatial predicates and regions | polygons, convex hulls, and general “inside/outside” logic |
+| [Mesh](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgDomain/Mesh) | mesh topology and mesh variables | the main spatial discretization container |
+| [Utils](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgDomain/Utils) | domain utilities | field variables, dof layout, domain context, time integration helpers |
+| [Swarm](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgDomain/Swarm) | particles and particle data | material points, swarm variables, layout, migration, shadow sync |
 
 ### 17.4 `Geometry`: the mathematical foundation
 
 Important entry files:
 
-- [Geometry.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Geometry/src/Geometry.h#L11-L25)
-- [Geometry/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Geometry/src/Init.c#L20-L24)
+- [Geometry.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Geometry/src/Geometry.h#L11-L25)
+- [Geometry/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Geometry/src/Init.c#L20-L24)
 
 This layer is intentionally simple:
 
@@ -1189,8 +1338,8 @@ Why this exists as its own module:
 
 Important files:
 
-- [Shape.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Shape/src/Shape.h#L11-L21)
-- [Shape/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Shape/src/Init.c#L19-L32)
+- [Shape.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Shape/src/Shape.h#L11-L21)
+- [Shape/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Shape/src/Init.c#L19-L32)
 
 This layer introduces “regions in space”:
 
@@ -1210,9 +1359,9 @@ So `Shape` is one of the bridges between pure geometry and model semantics.
 
 Important files:
 
-- [Mesh.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/Mesh.h#L11-L43)
-- [Mesh/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/Init.c#L25-L56)
-- [MeshVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/MeshVariable.h#L20-L31)
+- [Mesh.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/Mesh.h#L11-L43)
+- [Mesh/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/Init.c#L25-L56)
+- [MeshVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/MeshVariable.h#L20-L31)
 
 This is one of the most important layers in the entire codebase.
 
@@ -1239,8 +1388,8 @@ That distinction is subtle but important:
 
 Important files:
 
-- [Utils.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Utils/src/Utils.h#L11-L31)
-- [Utils/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Utils/src/Init.c#L21-L39)
+- [Utils.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Utils/src/Utils.h#L11-L31)
+- [Utils/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Utils/src/Init.c#L21-L39)
 
 This module contains several “glue concepts” that are essential for moving from raw domain objects toward discretized equations:
 
@@ -1259,8 +1408,8 @@ Why this matters:
 
 Important files:
 
-- [Swarm.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Swarm.h#L11-L42)
-- [Swarm/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Init.c#L31-L80)
+- [Swarm.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Swarm.h#L11-L42)
+- [Swarm/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Init.c#L31-L80)
 
 The swarm system provides:
 
@@ -1287,12 +1436,12 @@ One of the most useful architectural distinctions in Underworld is:
 
 This is visible in:
 
-- [MeshVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/MeshVariable.h#L20-L31)
-- [FeVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
+- [MeshVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Mesh/src/MeshVariable.h#L20-L31)
+- [FeVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
 
 And it is visible even from Python:
 
-- [mesh/_meshvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_meshvariable.py#L23-L58)
+- [mesh/_meshvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_meshvariable.py#L23-L58)
 
 That Python file effectively builds both sides:
 
@@ -1313,11 +1462,11 @@ If `StgDomain` defines the simulation world, `StgFEM` defines how that world bec
 
 Its umbrella entry is:
 
-- [StgFEM.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM/src/StgFEM.h#L11-L20)
+- [StgFEM.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM/src/StgFEM.h#L11-L20)
 
 Its top-level init is:
 
-- [libStgFEM/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM/src/Init.c#L25-L58)
+- [libStgFEM/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM/src/Init.c#L25-L58)
 
 The init order already tells you the intended architecture:
 
@@ -1348,20 +1497,20 @@ This is the layer between:
 
 | Submodule | Main idea | What it contributes |
 |---|---|---|
-| [Discretisation](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation) | FE object definitions | `FeMesh`, `FeVariable`, element types, equation numbering |
-| [SLE](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE) | System of Linear Equations layer | matrices, vectors, equation systems, nonlinear solve support |
-| [Assembly](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Assembly) | PDE term assembly | reusable matrix/vector term implementations |
-| [Utils](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Utils) | FE helper tools | semi-Lagrangian and other FE-related helpers |
-| [libStgFEM](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM) | umbrella module | combines the submodules into the runtime-loadable FEM layer |
+| [Discretisation](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation) | FE object definitions | `FeMesh`, `FeVariable`, element types, equation numbering |
+| [SLE](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE) | System of Linear Equations layer | matrices, vectors, equation systems, nonlinear solve support |
+| [Assembly](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgFEM/Assembly) | PDE term assembly | reusable matrix/vector term implementations |
+| [Utils](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgFEM/Utils) | FE helper tools | semi-Lagrangian and other FE-related helpers |
+| [libStgFEM](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/StgFEM/libStgFEM) | umbrella module | combines the submodules into the runtime-loadable FEM layer |
 
 ### 18.3 `Discretisation`: from domain objects to FE objects
 
 Important files:
 
-- [Discretisation.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Discretisation.h#L11-L56)
-- [Discretisation/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L43-L95)
-- [FeMesh.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeMesh.h#L19-L29)
-- [FeVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
+- [Discretisation.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Discretisation.h#L11-L56)
+- [Discretisation/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L43-L95)
+- [FeMesh.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeMesh.h#L19-L29)
+- [FeVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
 
 This layer upgrades domain objects into finite-element objects.
 
@@ -1382,11 +1531,11 @@ This is the first point where the code starts to look like a “real FE code” 
 
 Important files:
 
-- [SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/src/SLE.h#L11-L20)
-- [SystemLinearEquations.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115)
-- [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c)
-- [SolutionVector.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SolutionVector.h#L18-L28)
-- [StiffnessMatrix.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/StiffnessMatrix.h#L28-L69)
+- [SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/src/SLE.h#L11-L20)
+- [SystemLinearEquations.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115)
+- [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c)
+- [SolutionVector.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SolutionVector.h#L18-L28)
+- [StiffnessMatrix.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/StiffnessMatrix.h#L28-L69)
 
 `SLE` stands for **System of Linear Equations**.
 
@@ -1406,7 +1555,7 @@ This is one of the most important architectural layers in Underworld because it 
 
 One of the best places to understand the whole design is:
 
-- [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c)
+- [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c)
 
 The execution entry points define a standard pipeline:
 
@@ -1428,8 +1577,8 @@ This is extremely important conceptually:
 
 Important files:
 
-- [Assembly.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Assembly/src/Assembly.h#L11-L24)
-- [Assembly/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Assembly/src/Init.c#L40-L48)
+- [Assembly.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Assembly/src/Assembly.h#L11-L24)
+- [Assembly/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Assembly/src/Init.c#L40-L48)
 
 This module contains reusable assembly-term implementations such as:
 
@@ -1448,8 +1597,8 @@ Why this design matters:
 
 Important files:
 
-- [ProvidedSystems/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/src/Init.c#L23-L29)
-- [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
+- [ProvidedSystems/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/src/Init.c#L23-L29)
+- [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
 
 This part of `StgFEM` defines prebuilt PDE system families on top of the generic SLE layer.
 
@@ -1475,8 +1624,8 @@ That structured representation is exactly what later enables specialized Stokes 
 
 Important files:
 
-- [PETScMGSolver.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/PETScMGSolver.h#L20-L64)
-- [MGOpGenerator.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/MGOpGenerator.h#L18-L37)
+- [PETScMGSolver.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/PETScMGSolver.h#L20-L64)
+- [MGOpGenerator.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/MGOpGenerator.h#L18-L37)
 
 Multigrid is not a separate top-level Underworld framework; it is treated as part of the equation-system infrastructure inside `StgFEM/SLE`.
 
@@ -1498,7 +1647,7 @@ One subtle but very important fact:
 
 See:
 
-- [StgFEM/Discretisation/src/Init.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L86-L91)
+- [StgFEM/Discretisation/src/Init.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/Init.c#L86-L91)
 
 This is a strong signal that PETSc is conceptually tied to:
 
@@ -1600,7 +1749,7 @@ So the `Solvers` module is best understood as the **bridge layer between Underwo
 
 The native solver umbrella is built under:
 
-- [Solvers](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers)
+- [Solvers](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/Solvers)
 
 Its role is not to redefine finite-element objects. Instead, it takes objects that already exist in `StgFEM/SLE`, such as:
 
@@ -1623,10 +1772,10 @@ This is especially important for the Stokes problem, where Underworld does not j
 
 | Submodule | Main idea | Why it exists |
 |---|---|---|
-| [Assembly](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/Assembly) | solver-side assembly support | extra matrix assembly utilities closely tied to solver needs |
-| [SLE](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/SLE) | solver-side SLE support | solver-facing SLE integrations beyond generic `StgFEM` infrastructure |
-| [KSPSolvers](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers) | PETSc KSP/PC integration | the most important directory for Stokes solve behavior |
-| [libSolvers](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/libSolvers) | umbrella/toolbox layer | runtime-loadable wrapper over the solver stack |
+| [Assembly](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/Solvers/Assembly) | solver-side assembly support | extra matrix assembly utilities closely tied to solver needs |
+| [SLE](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/Solvers/SLE) | solver-side SLE support | solver-facing SLE integrations beyond generic `StgFEM` infrastructure |
+| [KSPSolvers](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers) | PETSc KSP/PC integration | the most important directory for Stokes solve behavior |
+| [libSolvers](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/libUnderworld/Solvers/libSolvers) | umbrella/toolbox layer | runtime-loadable wrapper over the solver stack |
 
 For most readers trying to understand “how Underworld solves Stokes”, the key path is:
 
@@ -1636,7 +1785,7 @@ For most readers trying to understand “how Underworld solves Stokes”, the ke
 
 The strongest clue is the built-in README:
 
-- [KSPSolvers/src/README](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/README#L1-L24)
+- [KSPSolvers/src/README](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/README#L1-L24)
 
 That directory is explicitly the interface layer between:
 
@@ -1649,8 +1798,8 @@ This means `KSPSolvers` is the place where Underworld stops being “a PDE assem
 
 Important files:
 
-- [StokesBlockKSPInterface.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.h#L43-L139)
-- [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
+- [StokesBlockKSPInterface.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.h#L43-L139)
+- [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
 
 This is the most important native solver file for the default Underworld Stokes path.
 
@@ -1669,7 +1818,7 @@ That is why this file is such a central architectural point:
 
 The `Stokes_SLE` structure defined in:
 
-- [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
+- [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
 
 contains explicit block members:
 
@@ -1699,7 +1848,7 @@ In the default path, `StokesBlockKSPInterface.c` performs operations such as:
 
 Representative source:
 
-- [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L365-L447)
+- [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L365-L447)
 
 This is the exact point where the abstract Underworld system becomes a PETSc algebraic object graph.
 
@@ -1711,8 +1860,8 @@ By default, Underworld does not simply say “use generic GMRES and hope for the
 
 Key files:
 
-- [ksp-register.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c#L43-L55)
-- [BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
+- [ksp-register.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c#L43-L55)
+- [BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
 
 Why this matters:
 
@@ -1735,8 +1884,8 @@ At a high level it:
 
 Important source:
 
-- [BSSCR.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.h#L20-L45)
-- [BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L162-L247)
+- [BSSCR.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.h#L20-L45)
+- [BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L162-L247)
 
 This is a major reason Underworld can solve geodynamics Stokes systems efficiently on large problems:
 
@@ -1747,17 +1896,17 @@ This is a major reason Underworld can solve geodynamics Stokes systems efficient
 
 | File | Role | Why it matters |
 |---|---|---|
-| [register_stokes_solvers.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/register_stokes_solvers.c#L20-L39) | registers custom Stokes PCs | adds custom PETSc preconditioner types such as `gtkg` |
-| [ksp-register.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c#L43-L55) | custom KSP registration | makes PETSc aware of `bsscr` and related KSP types |
-| [StokesBlockKSPInterface.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.h#L127-L138) | SWIG-visible control functions | exposes `SBKSP_SetSolver`, penalty controls, and diagnostics to Python |
-| [Solvers.i](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/Solvers.i#L37-L46) | SWIG interface file | exposes native solver interfaces into Python |
+| [register_stokes_solvers.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/register_stokes_solvers.c#L20-L39) | registers custom Stokes PCs | adds custom PETSc preconditioner types such as `gtkg` |
+| [ksp-register.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/ksp-register.c#L43-L55) | custom KSP registration | makes PETSc aware of `bsscr` and related KSP types |
+| [StokesBlockKSPInterface.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.h#L127-L138) | SWIG-visible control functions | exposes `SBKSP_SetSolver`, penalty controls, and diagnostics to Python |
+| [Solvers.i](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/Solvers.i#L37-L46) | SWIG interface file | exposes native solver interfaces into Python |
 
 ### 20.10 The Python-side solver control layer
 
 At the Python level, the two most important files are:
 
-- [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py)
-- [systems/_energy_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_energy_solver.py)
+- [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py)
+- [systems/_energy_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_energy_solver.py)
 
 These files do **not** reimplement PETSc in Python. Instead, they:
 
@@ -1777,7 +1926,7 @@ This is an important architectural distinction:
 
 The dedicated SWIG file:
 
-- [petsc.i](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/libUnderworldPy/petsc.i#L31-L67)
+- [petsc.i](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/libUnderworldPy/petsc.i#L31-L67)
 
 exposes only a narrow set of PETSc control helpers:
 
@@ -1800,7 +1949,7 @@ For linear Stokes solves, the main path is usually:
 
 But for more general nonlinear workflows, the generic SLE layer also supports PETSc `SNES`, primarily through:
 
-- [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L694-L713)
+- [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L694-L713)
 
 This means:
 
@@ -1815,13 +1964,13 @@ This is the most useful “end-to-end” view for understanding how the codebase
 
 1. User creates the system:
    - `stokes = uw.systems.Stokes(...)`
-   - source: [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py)
+   - source: [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py)
 2. User requests a solver:
    - `solver = uw.systems.Solver(stokes)`
-   - source: [systems/_solver.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_solver.py#L18-L35)
+   - source: [systems/_solver.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_solver.py#L18-L35)
 3. For a Stokes system, the factory returns:
    - `StokesSolver`
-   - source: [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py)
+   - source: [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py)
 
 #### 20.13.2 Python -> native binding layer
 
@@ -1829,7 +1978,7 @@ This is the most useful “end-to-end” view for understanding how the codebase
    - binds the native solver to the native `Stokes_SLE`
    - inserts PETSc options
    - triggers SLE setup and solve
-   - source: [systems/_bsscr.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_bsscr.py#L358-L451)
+   - source: [systems/_bsscr.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_bsscr.py#L358-L451)
 
 #### 20.13.3 Native SLE setup layer
 
@@ -1837,14 +1986,14 @@ This is the most useful “end-to-end” view for understanding how the codebase
    - BC setup
    - location-matrix / equation numbering setup
    - matrix/vector assembly
-   - source: [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L543-L595)
+   - source: [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L543-L595)
 
 #### 20.13.4 Native solver dispatch layer
 
 6. `SystemLinearEquations_ExecuteSolver(...)` dispatches into the configured native solver:
-   - source: [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L477-L491)
+   - source: [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c#L477-L491)
 7. `SLE_Solver` provides the generic solver execution interface:
-   - source: [SLE_Solver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SLE_Solver.c#L182-L212)
+   - source: [SLE_Solver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SLE_Solver.c#L182-L212)
 
 #### 20.13.5 Stokes-specific PETSc bridge
 
@@ -1852,7 +2001,7 @@ This is the most useful “end-to-end” view for understanding how the codebase
    - extracts `K/G/D/C,u/p,f/h`
    - builds nested PETSc matrices/vectors
    - sets KSP type to `bsscr` by default
-   - source: [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L365-L447)
+   - source: [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L365-L447)
 
 #### 20.13.6 PETSc solve layer
 
@@ -1862,12 +2011,12 @@ This is the most useful “end-to-end” view for understanding how the codebase
    - `KSPSetFromOptions`
    - `KSPSolve`
 10. `bsscr` resolves to Underworld’s custom KSP implementation:
-   - source: [BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
+   - source: [BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247)
 
 #### 20.13.7 Solution write-back layer
 
 11. After solve, the solution is written back from PETSc vectors into `FeVariable`s:
-   - source: [SolutionVector.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SolutionVector.c#L192-L340)
+   - source: [SolutionVector.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SolutionVector.c#L192-L340)
 
 ### 20.14 A compact call graph
 
@@ -1933,11 +2082,11 @@ It is the most important section if your goal is:
 
 ### 21.1 The three main equations in Underworld-style thermo-mechanical models
 
-At a high level, the thermo-mechanical workflow revolves around three core equations:
+At a high level, the thermo-mechanical workflow revolves around three continuum statements:
 
 1. **Stokes equation** for creeping flow / force balance
 2. **Energy conservation equation** for temperature evolution
-3. **Mass conservation / continuity equation** for incompressibility and material transport
+3. **Continuity equation** for incompressibility (or, in more general formulations, mass balance)
 
 In practice, these are not isolated:
 
@@ -1946,7 +2095,7 @@ In practice, these are not isolated:
 - viscosity may depend on strain rate, temperature, pressure, plasticity, melt, etc.,
 - temperature evolves through advection/diffusion and may feed back into density and rheology,
 - continuity couples velocity and pressure,
-- material identity is carried by swarms and feeds constitutive properties back into the PDE coefficients.
+- material identity is transported separately by swarms and feeds constitutive properties back into the PDE coefficients.
 
 That coupling is the real reason Underworld needs the layered architecture described earlier.
 
@@ -1954,10 +2103,11 @@ That coupling is the real reason Underworld needs the layered architecture descr
 
 | Physical concept | Python layer | Native FE layer | Solver layer |
 |---|---|---|---|
-| Stokes momentum balance | [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py) | [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39) + assembly terms | [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447) + [BSSCR.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247) |
-| Energy conservation | [systems/_thermal.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_thermal.py), [systems/_advectiondiffusion.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_advectiondiffusion.py) | `SystemLinearEquations` + energy assembly terms | [Energy_SLE_Solver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c#L185-L247) |
-| Continuity / mass conservation | [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py) + swarm advection in [systems/_timeintegration.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_timeintegration.py) | pressure-velocity block coupling in `Stokes_SLE` | Stokes block solve + swarm advection / update |
-| Constitutive laws | [function](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function), [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py), [UWGeodynamics/_density.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_density.py) | coefficients inserted into assembly terms | indirectly consumed through assembled matrices/vectors |
+| Stokes momentum balance | [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py) | [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39) + assembly terms | [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447) + [BSSCR.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/BSSCR/BSSCR.c#L149-L247) |
+| Energy conservation | [systems/_thermal.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_thermal.py), [systems/_advectiondiffusion.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_advectiondiffusion.py) | `SystemLinearEquations` + energy assembly terms | [Energy_SLE_Solver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c#L185-L247) |
+| Continuity / incompressibility | [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py) | pressure-velocity block coupling in `Stokes_SLE` | Stokes block solve |
+| Material transport | swarm advection in [systems/_timeintegration.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_timeintegration.py) | PICellerator/StgDomain swarm migration and interpolation | explicit time integration, not a PETSc continuity solve |
+| Constitutive laws | [function](https://github.com/underworldcode/underworld2/tree/v2.17.x/src/underworld/function), [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py), [UWGeodynamics/_density.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_density.py) | coefficients inserted into assembly terms | indirectly consumed through assembled matrices/vectors |
 
 ### 21.3 Stokes equation: force balance becomes a block system
 
@@ -1985,7 +2135,7 @@ In Underworld, this does **not** become one opaque matrix. It becomes an explici
 
 At the Python layer, the Stokes system is created in:
 
-- [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py)
+- [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py)
 
 This builder collects:
 
@@ -2008,7 +2158,7 @@ This is one of the clearest places where equation terms map to code:
 
 At the native FE layer, the Stokes problem is represented by:
 
-- [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
+- [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
 
 This is a very important design choice: Underworld stores the Stokes system explicitly as block objects:
 
@@ -2041,33 +2191,26 @@ The energy equation in thermo-mechanical models is typically of advection-diffus
 dT/dt + u · grad(T) = kappa nabla^2 T + source_terms
 ```
 
-In your notes, you also wrote down simplified conductive temperature forms and linked:
-
-- diffusivity
-- capacity
-- conductivity
-- radiogenic heating
-
-That matches the Underworld/UWGeodynamics implementation well.
+The exact temperature form depends on how conductivity, density, heat capacity, and source terms are represented. In UWGeodynamics, dimensional material properties are converted into the nondimensional coefficients used by the core advection–diffusion system; do not insert a dimensional heat-production value directly into a nondimensional source term without following that conversion path.
 
 #### 21.4.1 Python implementation paths
 
 There are two main Python entry points:
 
-- [systems/_thermal.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_thermal.py)
+- [systems/_thermal.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_thermal.py)
   - steady-state heat / diffusion-style problem
-- [systems/_advectiondiffusion.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_advectiondiffusion.py)
+- [systems/_advectiondiffusion.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_advectiondiffusion.py)
   - transient advection-diffusion problem
 
 In UWGeodynamics, these are wrapped at a higher level through:
 
-- [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py)
+- [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py)
 
 where temperature fields, diffusivity, heat production, and BCs are attached to the model object.
 
-#### 21.4.2 How your notes map to code
+#### 21.4.2 How thermal properties map to code
 
-Your note discusses:
+The high-level thermal model includes:
 
 - `Model.set_temperatureBCs`
 - `diffusivity`
@@ -2077,9 +2220,9 @@ Your note discusses:
 
 This maps very naturally onto UWGeodynamics material/model properties:
 
-- temperature BC wrappers: [UWGeodynamics/_boundary_conditions.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py)
-- material thermal parameters: [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py)
-- model orchestration: [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py)
+- temperature BC wrappers: [UWGeodynamics/_boundary_conditions.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_boundary_conditions.py)
+- material thermal parameters: [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py)
+- model orchestration: [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py)
 
 So conceptually:
 
@@ -2088,9 +2231,9 @@ So conceptually:
 - the FE layer builds the algebraic energy system,
 - and the solver layer solves it through PETSc.
 
-### 21.5 Mass conservation: two meanings in Underworld
+### 21.5 Continuity and material transport: related, not interchangeable
 
-In Underworld-style workflows, “mass conservation” appears in **two related but distinct senses**.
+Continuum mass balance and particle advection are related parts of the model, but they are not two implementations of the same equation. Keeping them separate prevents a serious conceptual error.
 
 #### 21.5.1 Continuity / incompressibility in the Stokes system
 
@@ -2104,15 +2247,15 @@ This is the pressure-velocity coupling part of the Stokes system.
 
 In code, it appears through:
 
-- the `G` / `D` coupling blocks in [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
-- the Stokes builder in [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py)
-- the block solve path in [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
+- the `G` / `D` coupling blocks in [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39)
+- the Stokes builder in [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py)
+- the block solve path in [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447)
 
-This is “mass conservation” in the PDE/saddle-point sense.
+For the common incompressible formulation, this is the continuum mass-balance constraint in the PDE/saddle-point system. Compressible formulations require the appropriate nonzero divergence/mass-balance terms.
 
 #### 21.5.2 Material advection in the particle-in-cell sense
 
-The second meaning is: materials should move consistently with the flow.
+Separately, materials should move consistently with the solved flow.
 
 Underworld handles this using swarms:
 
@@ -2122,13 +2265,13 @@ Underworld handles this using swarms:
 
 Key files:
 
-- [systems/_timeintegration.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_timeintegration.py)
-- [swarm/_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarm.py)
-- [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py)
+- [systems/_timeintegration.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_timeintegration.py)
+- [swarm/_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarm.py)
+- [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py)
 
-This is “mass conservation” in the sense of **tracking material distribution without locking the material interfaces to the mesh**.
+This tracks material distribution without locking interfaces to the mesh, but particle transport alone is **not a proof of discrete mass conservation**. Particle density, population control, boundary fluxes, interpolation, and material reassignment (especially at a coupled surface) can all affect conservation. Those effects should be measured in verification diagnostics.
 
-That is one of the defining Underworld design choices.
+The mesh–swarm split is nevertheless one of Underworld's defining design choices.
 
 ### 21.6 Where constitutive laws enter the equations
 
@@ -2146,12 +2289,12 @@ In Underworld2, these closures are introduced mostly through the **Function syst
 
 Important files:
 
-- [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py)
-- [function/branching.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/branching.py)
-- [function/tensor.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/tensor.py)
-- [function/rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/rheology.py)
-- [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py)
-- [UWGeodynamics/_density.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_density.py)
+- [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py)
+- [function/branching.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/branching.py)
+- [function/tensor.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/tensor.py)
+- [function/rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/rheology.py)
+- [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py)
+- [UWGeodynamics/_density.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_density.py)
 
 This is the critical idea:
 
@@ -2175,7 +2318,7 @@ rho = rho0 (1 + beta dP - alpha dT)
 
 This maps directly to:
 
-- [UWGeodynamics/_density.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_density.py)
+- [UWGeodynamics/_density.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_density.py)
 
 where density laws are implemented as objects that eventually return Underworld functions.
 
@@ -2200,9 +2343,9 @@ Your note also discusses:
 
 This maps to:
 
-- [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py)
-- [UWGeodynamics/resources/ViscousRheologies.json](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/resources/ViscousRheologies.json)
-- [UWGeodynamics/resources/PlasticRheologies.json](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/resources/PlasticRheologies.json)
+- [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py)
+- [UWGeodynamics/resources/ViscousRheologies.json](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/resources/ViscousRheologies.json)
+- [UWGeodynamics/resources/PlasticRheologies.json](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/resources/PlasticRheologies.json)
 
 Why the design is elegant:
 
@@ -2218,7 +2361,7 @@ This separation is one of the strongest design choices in Underworld:
 
 ### 21.9 Example: material geometry -> swarm field -> PDE coefficients
 
-Another major theme from your notes is geometric material setup:
+Geometric material setup is another major bridge from geological interpretation to numerical coefficients:
 
 - layers
 - polygons
@@ -2228,9 +2371,9 @@ Another major theme from your notes is geometric material setup:
 
 This maps to:
 
-- [UWGeodynamics/shapes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/shapes.py)
-- [function/shape.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/shape.py)
-- [swarm/_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarm.py)
+- [UWGeodynamics/shapes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/shapes.py)
+- [function/shape.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/shape.py)
+- [swarm/_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarm.py)
 
 The workflow is:
 
@@ -2309,16 +2452,16 @@ Its purpose is to answer very practical beginner questions such as:
 
 | Concept | Plain-language meaning | Where it appears in code |
 |---|---|---|
-| **Model** | the whole simulation setup: geometry, materials, fields, BCs, solver workflow | [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py) |
-| **Mesh** | the computational grid where PDE unknowns are solved | [mesh/_mesh.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_mesh.py), [FeMesh.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeMesh.h#L19-L29) |
-| **Swarm** | particles that carry material identity and history information | [swarm/_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarm.py), [Swarm.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Swarm.h#L11-L42) |
-| **MeshVariable** | data stored on the mesh | [mesh/_meshvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_meshvariable.py) |
-| **SwarmVariable** | data stored on particles | [swarm/_swarmvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarmvariable.py) |
-| **Function** | a composable mathematical expression used as a PDE coefficient or derived field | [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py) |
-| **Material** | a package of density/rheology/thermal properties attached to a region of the model | [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py) |
-| **Rheology** | the rule that determines how material deforms, especially viscosity and yielding | [UWGeodynamics/_rheology.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_rheology.py) |
-| **SLE** | the assembled algebraic system that will actually be solved | [SystemLinearEquations.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115) |
-| **PETSc** | the sparse algebra / solver engine that performs the numerical solve | [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447), [Energy_SLE_Solver.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c#L185-L247) |
+| **Model** | the whole simulation setup: geometry, materials, fields, BCs, solver workflow | [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py) |
+| **Mesh** | the computational grid where PDE unknowns are solved | [mesh/_mesh.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_mesh.py), [FeMesh.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeMesh.h#L19-L29) |
+| **Swarm** | particles that carry material identity and history information | [swarm/_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarm.py), [Swarm.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgDomain/Swarm/src/Swarm.h#L11-L42) |
+| **MeshVariable** | data stored on the mesh | [mesh/_meshvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_meshvariable.py) |
+| **SwarmVariable** | data stored on particles | [swarm/_swarmvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarmvariable.py) |
+| **Function** | a composable mathematical expression used as a PDE coefficient or derived field | [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py) |
+| **Material** | a package of density/rheology/thermal properties attached to a region of the model | [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py) |
+| **Rheology** | the rule that determines how material deforms, especially viscosity and yielding | [UWGeodynamics/_rheology.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_rheology.py) |
+| **SLE** | the assembled algebraic system that will actually be solved | [SystemLinearEquations.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115) |
+| **PETSc** | the sparse algebra / solver engine that performs the numerical solve | [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447), [Energy_SLE_Solver.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/Energy/src/Energy_SLE_Solver.c#L185-L247) |
 
 ### 22.2 The four easiest distinctions that prevent confusion
 
@@ -2358,8 +2501,8 @@ So you can think of it like this:
 
 Relevant code:
 
-- [mesh/_meshvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_meshvariable.py#L23-L58)
-- [FeVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
+- [mesh/_meshvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_meshvariable.py#L23-L58)
+- [FeVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68)
 
 #### 22.2.4 Function vs Variable
 
@@ -2442,8 +2585,8 @@ Use it when you want a lighter, beginner-first route through the project.
 
 If your goal is to **use the software first**, not become a solver developer immediately, read in this order:
 
-1. [docs/README.md](file:///Users/haibinyang/underworld2-2.17.x/docs/README.md)
-2. [docs/UWGeodynamics/README.md](file:///Users/haibinyang/underworld2-2.17.x/docs/UWGeodynamics/README.md)
+1. [docs/README.md](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/README.md)
+2. [docs/UWGeodynamics/README.md](https://github.com/underworldcode/underworld2/blob/v2.17.x/docs/UWGeodynamics/README.md)
 3. `docs/user_guide/01-08`
 4. `docs/UWGeodynamics/tutorials`
 5. Only then come back to this codebase guide.
@@ -2462,13 +2605,13 @@ If you only want a short starter set, these files give a surprisingly complete o
 
 | Goal | File |
 |---|---|
-| understand import/bootstrap | [underworld/__init__.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/__init__.py) |
-| understand Python-native glue | [underworld/_stgermain.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/_stgermain.py) |
-| understand coefficient logic | [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py) |
-| understand model orchestration | [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py) |
-| understand Stokes build | [systems/_stokes.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/systems/_stokes.py) |
-| understand native FE system | [SystemLinearEquations.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c) |
-| understand PETSc bridge | [StokesBlockKSPInterface.c](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447) |
+| understand import/bootstrap | [underworld/__init__.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/__init__.py) |
+| understand Python-native glue | [underworld/_stgermain.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/_stgermain.py) |
+| understand coefficient logic | [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py) |
+| understand model orchestration | [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py) |
+| understand Stokes build | [systems/_stokes.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/systems/_stokes.py) |
+| understand native FE system | [SystemLinearEquations.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.c) |
+| understand PETSc bridge | [StokesBlockKSPInterface.c](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/Solvers/KSPSolvers/src/StokesBlockKSPInterface.c#L241-L447) |
 
 ### 22.7 A practical reading strategy for notebooks and examples
 
@@ -2633,16 +2776,16 @@ For example:
 
 | Term | Plain-language meaning | Where to look |
 |---|---|---|
-| **`Model`** | high-level simulation container | [UWGeodynamics/_model.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_model.py) |
-| **`Material`** | container for physical properties assigned to a region | [UWGeodynamics/_material.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/UWGeodynamics/_material.py) |
-| **`Function`** | composable expression graph used for coefficients or derived quantities | [function/_function.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/function/_function.py) |
-| **`Mesh`** | grid on which FE fields live | [mesh/_mesh.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_mesh.py) |
-| **`Swarm`** | particles carrying material identity/history | [swarm/_swarm.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarm.py) |
-| **`MeshVariable`** | Python-side field stored on the mesh | [mesh/_meshvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/mesh/_meshvariable.py) |
-| **`SwarmVariable`** | Python-side field stored on particles | [swarm/_swarmvariable.py](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/swarm/_swarmvariable.py) |
-| **`FeVariable`** | native FE field object | [FeVariable.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68) |
-| **`SystemLinearEquations`** | generic native container for assembled linear systems | [SystemLinearEquations.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115) |
-| **`Stokes_SLE`** | native structured Stokes block system | [Stokes_SLE.h](file:///Users/haibinyang/underworld2-2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39) |
+| **`Model`** | high-level simulation container | [UWGeodynamics/_model.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_model.py) |
+| **`Material`** | container for physical properties assigned to a region | [UWGeodynamics/_material.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/UWGeodynamics/_material.py) |
+| **`Function`** | composable expression graph used for coefficients or derived quantities | [function/_function.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/function/_function.py) |
+| **`Mesh`** | grid on which FE fields live | [mesh/_mesh.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_mesh.py) |
+| **`Swarm`** | particles carrying material identity/history | [swarm/_swarm.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarm.py) |
+| **`MeshVariable`** | Python-side field stored on the mesh | [mesh/_meshvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/mesh/_meshvariable.py) |
+| **`SwarmVariable`** | Python-side field stored on particles | [swarm/_swarmvariable.py](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/swarm/_swarmvariable.py) |
+| **`FeVariable`** | native FE field object | [FeVariable.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/Discretisation/src/FeVariable.h#L37-L68) |
+| **`SystemLinearEquations`** | generic native container for assembled linear systems | [SystemLinearEquations.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/SystemSetup/src/SystemLinearEquations.h#L34-L115) |
+| **`Stokes_SLE`** | native structured Stokes block system | [Stokes_SLE.h](https://github.com/underworldcode/underworld2/blob/v2.17.x/src/underworld/libUnderworld/StgFEM/SLE/ProvidedSystems/StokesFlow/src/Stokes_SLE.h#L17-L39) |
 | **`materialField`** | swarm or projected field indicating material identity | used to decide which constitutive law applies where |
 | **`projMaterialField`** | mesh-based projection of swarm material information | useful for FE-side calculations or visualization |
 
